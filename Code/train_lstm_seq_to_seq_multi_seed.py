@@ -90,7 +90,7 @@ LR_MIN = 1e-6              # Untergrenze
 # Early Stopping Konfiguration
 # PATIENCE = Anzahl aufeinanderfolgender Epochen ohne Verbesserung.
 # MIN_DELTA = Mindestverbesserung der Metrik, damit es als echte Verbesserung zählt.
-PATIENCE = 6
+PATIENCE = 10
 MIN_DELTA = 0.001
 
 # Embedding-Dimensionen für Merkmale, wie Item, Store, State.
