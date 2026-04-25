@@ -48,7 +48,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Seeds: Anzahl an Traningsläufen mit der identischen Hyperparameterkonfiguration | SEED = Random Initialisierung | NUM_SEEDS = Anzahl an SEEDS (Trainingsläufen)
 SEED = 1
-NUM_SEEDS = 1 # Wichtig: Wenn Optuna eingeschaltet ist und damit bereits Optuna mehrere Seeds durchläuft, sind diese Seeds hier nicht nötig. 
+NUM_SEEDS = 3 # Wichtig: Wenn Optuna eingeschaltet ist und damit bereits Optuna mehrere Seeds durchläuft, sind diese Seeds hier nicht nötig. 
 #Für die finalen Runs mit den Hyperparametern wird Optuna ausgeschaltet und dann kann hier NUM_SEEDS wieder zb. auf 3 gestellt werden.
 
 # Wird nur zur Dokumentation genutzt. Anzahl der Serien wird durch Subset bestimmt.
@@ -59,7 +59,7 @@ SEQ_LEN = 56
 HORIZON = 28
 
 # Anzahl der maximalen Traingsepochen pro Run (Seed). Wird ggf. durch PATIENCE (Early Stopping) vorher beendet.
-MAX_EPOCHS = 25
+MAX_EPOCHS = 40
 
 # Trainingsumfang definieren Ende
 # -----------------------------------------------------------------------------
@@ -71,7 +71,6 @@ MAX_EPOCHS = 25
 # Batch Size: Wird so festgelegt, dass die GPU maximal ausgelastet wird um das Training zu beschleunigen.
 BATCH_SIZE = 1024
 
-
 # Hidden Size: Anzahl der Einheiten (Neuronen) pro verstecktem Layer 
 HIDDEN_SIZE = 256
 
@@ -79,10 +78,10 @@ HIDDEN_SIZE = 256
 LAYER = 3
 
 # DROPOUT = Dropout zwischen den LSTM-Layern (wirkt nur bei LAYER > 1).
-DROPOUT = 0.1
+DROPOUT = 0.03180807600529381
 
 # Learning Rate und LR-Scheduler 
-LR = 3e-3
+LR = 0.0034873144934826875
 LR_SCHEDULER = "plateau"   # nur für Logging/Config
 LR_FACTOR = 0.5            # LR wird mit diesem Faktor multipliziert
 LR_PATIENCE = 3            # Epochen ohne Verbesserung bis Reduktion
@@ -108,7 +107,7 @@ STATE_EMB_DIM = 2
 # -------------------------------------------------------------------------
 # Optuna ist ein Tool, welches zur gezielten Suche der optimalen Hyperparameterkonfiguration genutzt werden kann. 
 # Der Suchraum der Parameter wird in der Funktion 'suggest_hyperparameters' bestimmt.
-USE_OPTUNA = True  # Für die Suche der besten Hyperparameter True, für finale Runs mit festgelegten Parametern False
+USE_OPTUNA = False  # Für die Suche der besten Hyperparameter True, für finale Runs mit festgelegten Parametern False
 OPTUNA_TRIALS = None # wird nicht mit fester Anzahl Trials verglichen, sondern jedes Modell bekommt eine definierte Trainingszeit. Hier 12 Stunden pro Modell
 OPTUNA_TIMEOUT_SEC = 43200 # 12 Stunden
 OPTUNA_SEEDS_PER_TRIAL = 1 # Jede Parameterkombination wird mit defefinierter Anzahl zufällig im Lösungsraum gestartet, Analog zu NUM_SEEDS
