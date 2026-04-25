@@ -64,7 +64,7 @@ DROPOUT = 0.08563246298016265
 
 LR_PATIENCE = 3
 LR_Factor = 0.5
-PATIENCE = 6
+PATIENCE = 10
 MIN_DELTA = 0.001
 LR_MIN = 1e-6      # Untergrenze, für LR-Scheduler
 
