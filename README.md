@@ -6,6 +6,8 @@ Ebenso ist eine Notebook enthalten, welches für das Cloud-Training erstellt wur
 Dieses Repository besteht aus:
 
 - Code
+- Ordnerstruktur für den Import des Subsets
+- Trainierten Modellen
 - Ergebnissen: Traningsläufe & finalen Testruns
 
 
