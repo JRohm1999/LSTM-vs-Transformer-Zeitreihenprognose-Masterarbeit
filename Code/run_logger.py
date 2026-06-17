@@ -1,26 +1,9 @@
 # run_logger.py
 # -----------------------------------------------------------------------------
-# Zweck dieser Datei:
-#   Diese Datei enthält Hilfsfunktionen für ein konsistentes Experiment-Tracking.
-#   Pro Trainingslauf wird ein Run-Ordner angelegt, in dem zentrale Artefakte
-#   abgelegt werden. Dies unterstützt Reproduzierbarkeit, Vergleichbarkeit und
-#   eine nachvollziehbare Dokumentation für die wissenschaftliche Arbeit.
-#
-# Inhaltliche Begründung:
-#   In empirischen Arbeiten mit Deep-Learning-Modellen ist die Nachvollziehbarkeit
-#   der Experimente entscheidend. Dazu gehören:
-#   - Die genaue Konfiguration eines Runs (Hyperparameter, Feature-Set, Gerät)
-#   - Die zeitliche Entwicklung der Loss- und Metrikwerte
-#   - Laufzeiten pro Epoche sowie Gesamtlaufzeit
-#   - Persistierung der Ergebnisse in einem strukturierten, auswertbaren Format
-#
-# Artefakte pro Run:
-#   - config.json: Konfiguration des Runs
-#   - system_info.json: Systeminformationen (z. B. GPU, Torch-Version)
-#   - metrics.xlsx: Tabellenformat (config / epochs / summary)
-#   - loss.png / metrics.png: Grafische Darstellung des Trainingsverlaufs
-# -----------------------------------------------------------------------------
+# Zweck dieses Skriptes:
+#   Diese Datei enthält Hilfsfunktionen für Logging in den Hauptskripten zum Traning und Testen der Modelle.
 
+# Importieren sämtlicher Bibliotheken die für die Funktionen gebracht werden
 import json
 import platform
 import socket
@@ -43,39 +26,7 @@ def _make_folder_safe(text):
             out.append("_")
     return "".join(out)
 
-
-# def create_run_folder(base_dir, model_name, config):
-#     # Pro Run wird ein separater Ordner erstellt.
-#     # Der Ordnername enthält einen Zeitstempel und ausgewählte Parameter.
-#     # Dies ermöglicht die schnelle Zuordnung von Ergebnissen zu Einstellungen.
-#     timestamp = time.strftime("%Y%m%d-%H%M%S")
-
-#     # Diese Parameter werden typischerweise zur Unterscheidung von Runs verwendet.
-#     keys_for_name = [
-#         "seed",
-#         "max_series",
-#         "layers",
-#         "seq_len",
-#         "encoder_len",
-#         "horizon",
-#         "pred_len",
-#         "batch_size",
-#         "lr",
-#         "hidden_size",
-#         "patience",
-#     ]
-
-#     parts = [timestamp]
-#     for k in keys_for_name:
-#         if k in config and config[k] is not None:
-#             parts.append(f"{_make_folder_safe(k)}={_make_folder_safe(config[k])}")
-
-#     run_name = "__".join(parts)
-#     run_dir = Path(base_dir) / model_name / run_name
-#     run_dir.mkdir(parents=True, exist_ok=True)
-#     return run_dir
-
-
+# Systeminfos sammeln und zurückgeben
 def get_system_info():
     # Es werden Systeminformationen gesammelt, die für eine Reproduktion der Ergebnisse
     # relevant sein können. Dies ist insbesondere bei GPU-Training sinnvoll.
@@ -98,17 +49,15 @@ def get_system_info():
 
     return info
 
-
+# Sichern eines JSON Files 
 def save_json(path, data):
     # Speicherung einer Python-Datenstruktur im JSON-Format.
     # Das Format ist für Menschen lesbar und für spätere Analysen einfach nutzbar.
     path = Path(path)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-
+# Sichern einer Excel-Datei
 def save_excel(run_dir, config, epoch_rows, summary):
-    # Speicherung von Konfiguration, epoch-weisen Metriken und Zusammenfassung in Excel.
-    # Das Excel-Format erleichtert die Auswertung und die Integration in Berichte.
     run_dir = Path(run_dir)
     out_path = run_dir / "metrics.xlsx"
 
@@ -123,11 +72,8 @@ def save_excel(run_dir, config, epoch_rows, summary):
 
     return out_path
 
-
+# Erstellung einfacher Visualisierungen des Trainingsverlaufs mit Plots
 def save_plots(run_dir, epoch_rows):
-    # Erstellung einfacher Visualisierungen des Trainingsverlaufs.
-    # Diese Plots unterstützen eine schnelle qualitative Beurteilung von Konvergenz
-    # und möglichem Overfitting.
     run_dir = Path(run_dir)
     df = pd.DataFrame(epoch_rows)
 
