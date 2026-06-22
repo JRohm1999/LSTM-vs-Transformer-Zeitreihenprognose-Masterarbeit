@@ -1,39 +1,21 @@
-# LSTM Sequenz to Sequence Modell für Multi-Horizon Forecasting
-# -----------------------------------------------------------------------------
-# Ziel:
-#   Training eines LSTM-Modells für Multi-Horizon Forecasting auf dem
-#   vorverarbeiteten M5-Datensatz (Long-Format).
-#
-# Wesentliche Punkte dieser Version:
-#   (1) Autoregressive Zeitreihenfeatures werden aus y_log abgeleitet (nicht aus y_log),
-#       um eine konsistente Skalierung der Eingangsvariablen sicherzustellen.
-#       Dies reduziert Optimierungsprobleme durch gemischte Feature-Skalen.
-#
-#   (2) Early Stopping wird implementiert, um unnötige Epochen zu vermeiden und
-#       Overfitting-Risiko zu reduzieren. Überwacht wird val_mase, da diese Metrik
-#       für den Modellvergleich relevant ist.
-#
-#   (3) Pro Run werden Metriken, Laufzeiten und Plots in einem Run-Ordner gespeichert.
-#
-# Voraussetzungen:
-#   - data/preprocessed/meta.json
-#   - data/preprocessed/m5_long.csv oder m5_long.parquet
-#   - Spalten: series_id, time_idx, split, y, y_log, y_log sowie exogene Features
-# -----------------------------------------------------------------------------
+# Traningsskript für LSTM Sequenz-to-Sequenz-Modell
 
-import json
-import time
-from pathlib import Path
+# Importieren der notwendigen Bibliotheken
+import json     # Zur Ausgabe von Informationen
+import time     # Zeitmessung der Traningsläufe
+from pathlib import Path        # Hardwareunabhängige Pfadverwaltung (Training auf Cloudinstanz)
 
-import numpy as np
-import pandas as pd
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader, TensorDataset
+import numpy as np      # Numerische Berechnungen
+import pandas as pd     # Insbesondere für Laden und Modellieren des Datensatzes
+import torch            # PyTorch: Hauptbibliothek für neuronale Netz
+import torch.nn as nn   # Enthält die wichtigsten Bausteine wie LSTM und Embedding
+from torch.utils.data import DataLoader, TensorDataset      # Notwendig für das Laden der Daten ins Modell
 
+# Optuna: Framework zur Optimierung der Hyperparameter, optuna.visualization = sind vorgefertigte Visualisierungen
 import optuna
 from optuna.visualization import (plot_optimization_history, plot_param_importances, plot_parallel_coordinate, plot_slice)
 
+# Importieren verschiedener Funktionen von dem run_logger Skript
 from run_logger import (
     get_system_info,
     save_json,
@@ -41,32 +23,36 @@ from run_logger import (
 )
 
 # -----------------------------------------------------------------------------
-# Trainingsumfang definieren Start
+# Pfade
+# -----------------------------------------------------------------------------
+PREP_DIR = Path("data") / "preprocessed"
+CSV_PATH = PREP_DIR / "m5_long.csv"
+RUNS_DIR = Path("runs") / "lstm"
+
 
 # Prüfen ob GPU zum Tranining bereitsteht und dies in der DEVICE Variable speichern
+# Traning wurde grundsätzlich auf Cuda-Fähiger Hardware durchgeführt um Traning zu beschleunigen
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Seeds: Anzahl an Traningsläufen mit der identischen Hyperparameterkonfiguration | SEED = Random Initialisierung | NUM_SEEDS = Anzahl an SEEDS (Trainingsläufen)
 SEED = 1
-NUM_SEEDS = 3 # Wichtig: Wenn Optuna eingeschaltet ist und damit bereits Optuna mehrere Seeds durchläuft, sind diese Seeds hier nicht nötig. 
+NUM_SEEDS = 1 # Seeds für das finale Traning. Wichtig: Wenn Optuna eingeschaltet ist und damit bereits Optuna mehrere Seeds durchläuft, sind diese Seeds hier nicht nötig.
 #Für die finalen Runs mit den Hyperparametern wird Optuna ausgeschaltet und dann kann hier NUM_SEEDS wieder zb. auf 3 gestellt werden.
 
 # Wird nur zur Dokumentation genutzt. Anzahl der Serien wird durch Subset bestimmt.
 MAX_SERIES = 1000
 
-# Input und Output Sequenzlänge. Modell sieht 56 Tage der Vergangenheit und erstellt eine Prognose für die folgenden 28 Tage
+# SEQ_LEN = Encoder-Länge (Vergangenheit die das Modell als Input bekommt)
+# HORIZON = Decoder-Länge (Zukunft, die das Modell vorhersagen soll)
 SEQ_LEN = 56
 HORIZON = 28
 
-# Anzahl der maximalen Traingsepochen pro Run (Seed). Wird ggf. durch PATIENCE (Early Stopping) vorher beendet.
-MAX_EPOCHS = 40
-
-# Trainingsumfang definieren Ende
-# -----------------------------------------------------------------------------
-
+# Anzahl der maximalen Traingsepochen pro Run (Seed). Wird ggf. durch PATIENCE (Early-Stopping) vorher beendet.
+MAX_EPOCHS = 50
 
 # -----------------------------------------------------------------------------
-# Modell-Architektur Konfiguration Start
+# Modell-Architektur Konfiguration
+# -----------------------------------------------------------------------------
 
 # Batch Size: Wird so festgelegt, dass die GPU maximal ausgelastet wird um das Training zu beschleunigen.
 BATCH_SIZE = 1024
@@ -78,6 +64,7 @@ HIDDEN_SIZE = 256
 LAYER = 2
 
 # DROPOUT = Dropout zwischen den LSTM-Layern (wirkt nur bei LAYER > 1).
+# Das DROPOUT deaktiviert zufällig Neuronen während des Trainings, um Overfitting zu reduzieren.
 DROPOUT = 0.22358661334948865
 
 # Learning Rate und LR-Scheduler 
@@ -94,7 +81,7 @@ PATIENCE = 10
 MIN_DELTA = 0.001
 
 # Embedding-Dimensionen für Merkmale, wie Item, Store, State.
-# Die größe der Dimensionen richtet sich grob nach der Anzahl der Kategorien pro Merkmal.
+# Die größe der Dimensionen richtet sich grob nach der Anzahl der Kategorien pro Merkmal. Item groß, Store mittel, State klein
 ITEM_EMB_DIM = 8
 STORE_EMB_DIM = 4
 STATE_EMB_DIM = 2
@@ -108,50 +95,37 @@ STATE_EMB_DIM = 2
 # Optuna ist ein Tool, welches zur gezielten Suche der optimalen Hyperparameterkonfiguration genutzt werden kann. 
 # Der Suchraum der Parameter wird in der Funktion 'suggest_hyperparameters' bestimmt.
 USE_OPTUNA = False  # Für die Suche der besten Hyperparameter True, für finale Runs mit festgelegten Parametern False
-OPTUNA_TRIALS = None # verschiedene Kombinationen an Parametern
-OPTUNA_TIMEOUT_SEC = 43200
+OPTUNA_TRIALS = None # Anzahl an Trials (Durchläufen), None heißt kein Limit per Trials sondern hier per Timeout
+OPTUNA_TIMEOUT_SEC = 43200 # Maximale Laufzeit der Optuna-Suche in Sekunden (hier: 12 Stunden)
 OPTUNA_SEEDS_PER_TRIAL = 1 # Jede Parameterkombination wird mit defefinierter Anzahl zufällig im Lösungsraum gestartet, Analog zu NUM_SEEDS
-OPTUNA_DIRECTION = "minimize"  # Lossvalue von val_mase minimieren
+OPTUNA_DIRECTION = "minimize"  # Ziel: Lossvalue von val_mase minimieren
 
 
-# -----------------------------------------------------------------------------
-# Pfade
-# -----------------------------------------------------------------------------
-PREP_DIR = Path("data") / "preprocessed"
-CSV_PATH = PREP_DIR / "m5_long.csv"
-RUNS_DIR = Path("runs") / "lstm"
-
-
+# Funktion zum setzen der Zufallsseeds um Reproduzierbarkeit zu erhöhen bzw. zu testen.
 def set_seed(seed: int) -> None:
-    # Setzen der Zufallsseeds zur Erhöhung der Reproduzierbarkeit.
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    np.random.seed(seed)        # Zufallsoperation erzeugt einen Startwert
+    torch.manual_seed(seed)     # Seed für PyTorch CPU-Operationen - wenn keine GPU per Cuda verfügbar ist
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
+        torch.cuda.manual_seed_all(seed) # Seed für GPU (Cuda) setzen
 
-
+# Funktion zum Laden des vorverarbeiteten Datensatzes.
 def load_preprocessed():
     # Laden des vorverarbeiteten Datensatzes.
-
     if CSV_PATH.exists():
-        df = pd.read_csv(CSV_PATH, parse_dates=["date"])
+        df = pd.read_csv(CSV_PATH, parse_dates=["date"]) # liest CSV in Dataframe ein und wandelt die Datumsspalte automatisch in datetime-Objekte um.
     else:
-        raise FileNotFoundError("Keine preprocessed Datei gefunden (m5_long.csv).")
-
+        raise FileNotFoundError("Keine preprocessed Datei gefunden (m5_long.csv).") # Wenn keine Datei vorhanden wird Fehler ausgegeben.
     return df
 
 
+# Funktion um die Feature-Spalten zusammenzustellen
 def build_feature_columns():
-    # Zusammenstellung der Feature-Spalten.
     # Unterschied zu Many-to-One Architektur: Aufteilung zwischen zwei Feature-Sets.
-    # 1. Decoder Features: Alle Features, die für die Vorhersage der nächsten 28 Tage relevant sein könnten. Zum Beispiel: Preise, Wochentage etc.
-    # 2. Endocder Features: Decoder Features + Features wie Rolling oder Lag, die informationen über den Vorhersagezeitraum enthalten können und somit nicht im Decoder genutzt werden sollten. 
     # Encoder Features -> Alle Features 
     # Decoder Features -> Nur Vergangenheitsfeatures, 
 
     enc_cols = []
     dec_cols = []
-
 
     # 1. Decoder Features
     Decoder_Features = [
@@ -165,63 +139,49 @@ def build_feature_columns():
         "has_event_2",
     ]
 
-    LAG_LIST = [1, 7, 14, 28]
-    ROLLING_WINDOWS = [7, 28]
+    LAG_LIST = [1, 7, 14, 28]  # Liste welche die Tage der Lag Features enthält
+    ROLLING_WINDOWS = [7, 28]  # Liste welche den Zeitraum der Rolling Features enthält
 
     # 2. Encoder Features
-    Encoder_Features = ["y_log"]
+    Encoder_Features = ["y_log"]    # logarithmierte Verkaufszahl (Zielkennzahl)
     Encoder_Features += [f"y_log_lag_{l}" for l in LAG_LIST]
     Encoder_Features += [f"y_log_roll_mean_{w}" for w in ROLLING_WINDOWS]
     Encoder_Features += [f"y_log_roll_std_{w}" for w in ROLLING_WINDOWS]
 
-    # Encoder sieht alles
+    # Encoder kann alle Features sehen
     enc_cols += Encoder_Features + Decoder_Features
 
-    # Decoder sieht nur das, was wir in der Zukunft sicher wissen (Kalender + Preis)
+    # Decoder sieht nur das, was aus der Zukunft bekannt ist (Kalender + Preis)
     dec_cols = Decoder_Features
 
-    return enc_cols, dec_cols
+    return enc_cols, dec_cols # Rückgabe der beiden Listen
 
-
+# Funktion zur Berechnung des MASE-Denominators (Nenners), also MAE der Naivprognose, pro Serie auf Basis der Trainingsdaten.
 def compute_mase_denominators(train_df: pd.DataFrame, seasonality: int = 7) -> dict:
-    # Berechnung des MASE-Denominators pro Serie auf Basis der Trainingsdaten.
-    # Dient der Berechung der MASE Metrik für das Training und die Validierung. Entspricht dem Nenner der MASE-Formel, der den durchschnittlichen Fehler eines Naive-Forecasters mit saisonalem Lag darstellt.
-    #
-    # Definition:
-    #   Denominator = mean(|y_t - y_{t-seasonality}|)
-    #
-    # Hintergrund:
-    #   MASE skaliert den absoluten Fehler am typischen Fehler eines Naive-Forecasters.
-    #   Dies ermöglicht einen vergleichbaren Maßstab über Serien mit sehr unterschiedlichen Niveaus.
-    denoms = {}
 
-    for series_id, series_values in train_df.groupby("series_id"):
-        series_values = series_values.sort_values("time_idx")
-        y = series_values["y"].values.astype(np.float32)
+    denoms = {} # Ergebnis-Dictionary: series_id -> Denominator-Wert
 
-        # Für sehr kurze Serien (länger als die Saisonalität) wird der Denominator auf 1 gesetzt, um Division durch Null zu vermeiden.
+    for series_id, series_values in train_df.groupby("series_id"):  # aus dem Traningsdataframe die Serien_id und die restlichen Werte extrahieren.
+        series_values = series_values.sort_values("time_idx")       # Zeitlich sortieren, damit Lag-Berechnung korrekt ist.
+        y = series_values["y"].values.astype(np.float32)            # y = Verkaufswerte mit Float32 extrahieren um Datenmenge gering zu halten
+
+        # Für sehr kurze Serien <= 7 Tage wird der Nenner (MAE) auf 1 gesetzt, um Division durch Null zu vermeiden.
+        # Sollte mit der länge der Datensätze nicht vorkommen. Falls doch greift die Logik.
         if len(y) <= seasonality:
             denoms[series_id] = 1.0
             continue
 
-        # Berechnung des durchschnittlichen absoluten Unterschieds zwischen y_t (aktueller Tag) und y_{t-seasonality} (7 Tage zurück).
+        # Berechnung des durchschnittlichen absoluten Unterschieds zwischen "aktuellem" Tag und sieben Tage zurück.
         diff = np.abs(y[seasonality:] - y[:-seasonality])
-        den = float(np.mean(diff)) if np.mean(diff) > 0 else 1.0
-        denoms[series_id] = den
+        den = float(np.mean(diff)) if np.mean(diff) > 0 else 1.0   # Für den Fall, dass es keine Abweichung gibt wird eins als Fallback genutzt, damit nicht durch null geteilt wird.
+        denoms[series_id] = den # enthält alle MAE-Werte der naitivprognose pro Serie
 
     return denoms
 
+# Funktion für die Erzeugung von Sliding Windows
+def build_sliding_windows(df: pd.DataFrame, split_name: str, series_to_idx: dict, enc_cols: list, dec_cols: list):
 
-def build_windows(df: pd.DataFrame, split_name: str, series_to_idx: dict, enc_cols: list, dec_cols: list):
-    # Erzeugung von Sliding-Window Samples.
-    #
-    # Definition:
-    #   Für jeden Startzeitpunkt t wird ein Sample erzeugt:
-    #     X = Features der Zeitpunkte [t-SEQ_LEN, ..., t-1]
-    #     Y = y_log der Zeitpunkte   [t, ..., t+HORIZON-1]
-    #
-    # Split-Logik:
-    #   Ein Sample wird erzeugt, wenn split[t] == split_name.
+    # Leere Listen, die anschließend mit den Sliding-Window Samples befüllt werden.
     feature_values_enc_list, feature_values_dec_list, y_log_list, series_list, item_list, store_list, state_list = [], [], [], [], [], [], []
 
     for series_id, series_values in df.groupby("series_id"):
@@ -697,9 +657,9 @@ def train_one_seed(
         num_layers = int(hpo_params.get("num_layers", num_layers))
         dropout_rate = float(hpo_params.get("dropout", dropout_rate))
 
-    # Erzeugung der Sliding Windows über die Funktion build_windows.
-    feature_values_enc_train, feature_values_dec_train, Y_log_train, Series_train, Item_train, Store_train, State_train = build_windows(df, "train", series_to_idx, feature_cols_enc, feature_cols_dec)
-    feature_values_enc_val, feature_values_dec_val, Y_log_val, Series_val, Item_val, Store_val, State_val = build_windows(df, "val", series_to_idx, feature_cols_enc, feature_cols_dec)
+    # Erzeugung der Sliding Windows über die Funktion build_sliding_windows.
+    feature_values_enc_train, feature_values_dec_train, Y_log_train, Series_train, Item_train, Store_train, State_train = build_sliding_windows(df, "train", series_to_idx, feature_cols_enc, feature_cols_dec)
+    feature_values_enc_val, feature_values_dec_val, Y_log_val, Series_val, Item_val, Store_val, State_val = build_sliding_windows(df, "val", series_to_idx, feature_cols_enc, feature_cols_dec)
 
     # Aufbau von je einem TensorDataset für Training und Validierung.
     train_ds = TensorDataset(
