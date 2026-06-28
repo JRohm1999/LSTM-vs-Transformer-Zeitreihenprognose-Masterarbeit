@@ -1,12 +1,6 @@
 # Analyse des Datensatzes auf den Vergleich der Komplexität von den Splits 'train', 'val' und 'test'
-# Hintergrund:  
-#   Beweis dafür, dass die 'val' und  'test' Periode komplexer ist als die 'train' Periode.
-#   Damit können die Ergebnisse der Arbeit besser eingeordnet werden.
-# Vorgehen:
-#   - Berechnung der MSE und MAE pro Serie und Split
-#   - Für Naive Baseline (Repeat-1) und Seasonal Naive Baseline (Repeat-7)
 
-
+# Import der nötigen Biliotheken
 import time
 import json
 import platform
@@ -27,12 +21,12 @@ PARQUET_PATH = DATA_DIR / "m5_long.parquet"
 HORIZON = 28
 SEASONALITY_1 = 1
 SEASONALITY_7 = 7
-SPLIT_NAME = "test"   # "val" or "test"
+SPLIT_NAME = "test"   # Übergabe von "val" oder "test", je nach dem welcher Split getestet werden soll.
 RUNS_DIR = Path("runs")
 
 
 # ---------------------------------------------------------------------
-# Data loading
+# Laden der Daten aus der CSV
 # ---------------------------------------------------------------------
 def load_data() -> pd.DataFrame:
     if CSV_PATH.exists():
@@ -42,43 +36,8 @@ def load_data() -> pd.DataFrame:
     return df
 
 
-# # ---------------------------------------------------------------------
-# # MASE denominator (in-sample seasonal naive error on TRAIN)
-# # ---------------------------------------------------------------------
-# def compute_mase_denominators(df: pd.DataFrame, seasonality: int = 7) -> dict:
-#     """Compute per-series MASE denominators on TRAIN split.
-
-#     den_i = mean(|y_t - y_{t-seasonality}|) over TRAIN observations.
-
-#     If a series has fewer than (seasonality + 1) TRAIN points, or the
-#     denominator is 0, we store NaN and skip it during MASE aggregation.
-#     """
-#     denoms: dict[str, float] = {}
-
-#     for sid, g in df.groupby("series_id"):
-#         g = g.sort_values("time_idx")
-#         g_train = g[g["split"] == "train"]
-
-#         y_tr = g_train["y"].astype(np.float32).values
-#         if len(y_tr) <= seasonality:
-#             denoms[sid] = np.nan
-#             continue
-
-#         diffs = np.abs(y_tr[seasonality:] - y_tr[:-seasonality])
-#         den = float(np.mean(diffs)) if len(diffs) else np.nan
-
-#         # Avoid division-by-zero explosions; follow common practice: mark as NaN
-#         # Wenn der Nenner 0 oder nicht endlich ist, wird MASE für diese Serie nicht berechnet.
-#         if not np.isfinite(den) or den <= 0.0:
-#             denoms[sid] = np.nan
-#         else:
-#             denoms[sid] = den
-
-#     return denoms
-
-
 # ---------------------------------------------------------------------
-# Naive Baseline (Repeat-1)
+# Erstellen der Naivprognose für den Zeitraum - 1 Tag
 # ---------------------------------------------------------------------
 def naive_baseline(df: pd.DataFrame, split_name: str):
     maes = []
@@ -131,7 +90,7 @@ def naive_baseline(df: pd.DataFrame, split_name: str):
 
 
 # ---------------------------------------------------------------------
-# Seasonal Naive Baseline (Repeat-7)
+# Erstellen der Naivprognose für den Zeitraum - 7 Tage
 # ---------------------------------------------------------------------
 def seasonal_naive_baseline(df: pd.DataFrame, split_name: str):
     maes = []
@@ -166,11 +125,6 @@ def seasonal_naive_baseline(df: pd.DataFrame, split_name: str):
             mses.append(mse)
             n_windows += 1
 
-            # MASE: mae (forecast error) / den (training in-sample seasonal naive error)
-            # if np.isfinite(den) and den > 0.0:
-            #     mases.append(mae / den)
-            #     n_windows_mase += 1
-
     return {
         'Baseline': 'Seasonal Naive (Repeat-7)',
         "split": split_name,
@@ -182,55 +136,9 @@ def seasonal_naive_baseline(df: pd.DataFrame, split_name: str):
         #"mase": float(np.mean(mases)) if mases else np.nan,
     }
 
-# def seasonal_naive_by_horizon(df: pd.DataFrame, split_name: str, denoms: dict) -> pd.DataFrame:
-#     mae_h = [[] for _ in range(HORIZON)]
-#     mse_h = [[] for _ in range(HORIZON)]
-#     mase_h = [[] for _ in range(HORIZON)]
-
-#     for sid, g in df.groupby("series_id"):
-#         g = g.sort_values("time_idx").reset_index(drop=True)
-
-#         y = g["y"].astype(np.float32).values
-#         splits = g["split"].values
-#         den = denoms.get(sid, np.nan)
-
-#         for t in range(SEASONALITY, len(g) - HORIZON + 1):
-#             if splits[t] != split_name:
-#                 continue
-
-#             y_true = y[t : t + HORIZON]
-#             y_pred = y[t - SEASONALITY : t - SEASONALITY + HORIZON]
-
-#             if len(y_pred) != HORIZON:
-#                 continue
-
-#             err = y_true - y_pred
-#             ae = np.abs(err)
-#             se = err ** 2
-
-#             for h in range(HORIZON):
-#                 mae_h[h].append(float(ae[h]))
-#                 mse_h[h].append(float(se[h]))
-#                 if np.isfinite(den) and den > 0.0:
-#                     mase_h[h].append(float(ae[h] / den))
-
-#     rows = []
-#     for h in range(HORIZON):
-#         rows.append(
-#             {
-#                 "horizon": h + 1,
-#                 "mae": float(np.mean(mae_h[h])) if mae_h[h] else np.nan,
-#                 "mse": float(np.mean(mse_h[h])) if mse_h[h] else np.nan,
-#                 "mase": float(np.mean(mase_h[h])) if mase_h[h] else np.nan,
-#                 "n": int(len(mae_h[h])),
-#                 "n_mase": int(len(mase_h[h])),
-#             }
-#         )
-#     return pd.DataFrame(rows)
-
 
 # ---------------------------------------------------------------------
-# Logging / Exports (analog zur Trainingsskript-Struktur)
+# Erstellen von Exportdateien mit den Ergebnissen der Naivprognose
 # ---------------------------------------------------------------------
 def get_system_info() -> dict:
     return {
@@ -251,40 +159,7 @@ def save_json(path: Path, obj: dict) -> None:
     with open(path, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
 
-
-# def save_plots(run_dir: Path, by_horizon_df: pd.DataFrame, results: dict) -> tuple[Path, Path]:
-#     loss_path = run_dir / "loss.png"
-#     metrics_path = run_dir / "metrics.png"
-
-#     # loss.png: MAE + MASE per horizon (two lines)
-#     plt.figure()
-#     plt.plot(by_horizon_df["horizon"], by_horizon_df["mae"], marker="o", label="MAE")
-#     if "mase" in by_horizon_df.columns:
-#         plt.plot(by_horizon_df["horizon"], by_horizon_df["mase"], marker="o", label="MASE")
-#     plt.title("Seasonal Naive: Fehler pro Horizont")
-#     plt.xlabel("Horizont (Tage)")
-#     plt.ylabel("Wert")
-#     plt.grid(True)
-#     plt.legend()
-#     plt.tight_layout()
-#     plt.savefig(loss_path, dpi=150)
-#     plt.close()
-
-#     # metrics.png: bar plot MAE/MSE/MASE (overall)
-#     plt.figure()
-#     labels = ["MAE", "MSE", "MASE"]
-#     vals = [float(results["mae"]), float(results["mse"]), float(results["mase"])]
-#     plt.bar(labels, vals)
-#     plt.title("Baseline-Metriken (Seasonal Naive)")
-#     plt.ylabel("Wert")
-#     plt.grid(True, axis="y")
-#     plt.tight_layout()
-#     plt.savefig(metrics_path, dpi=150)
-#     plt.close()
-
-#     return loss_path, metrics_path
-
-
+# Erstellung eines Forecast-Beispiels. Hintergrund war die Analyse, wie sich die Naivprognose im Verhältnis zu den tatsächlichen Werten verhält.
 def save_forecast_example(df: pd.DataFrame, split_name: str, out_path: Path, baseline: str) -> bool:
     rng = np.random.default_rng(42)
 
