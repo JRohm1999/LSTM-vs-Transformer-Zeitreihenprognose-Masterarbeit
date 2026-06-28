@@ -48,10 +48,10 @@ MODELS_TO_TEST = [
 # 2. Pfade zu Trainingsdateien und Modellen
 # =============================================================================
 
-MANY_TO_ONE_TRAIN_FILE = Path("Code/train_lstm_many_to_one_multi_seed.py")
-SEQ_TO_SEQ_TRAIN_FILE = Path("Code/train_lstm_seq_to_seq_multi_seed.py")
-TFT_TRAIN_FILE = Path("Code/train_TFT_multi_seed.py")
-PATCHTST_TRAIN_FILE = Path("Code/train_PatchTST_multi_seed.py")
+MANY_TO_ONE_TRAIN_FILE = Path("Code/train_lstm_many_to_one.py")
+SEQ_TO_SEQ_TRAIN_FILE = Path("Code/train_lstm_seq_to_seq.py")
+TFT_TRAIN_FILE = Path("Code/train_TFT.py")
+PATCHTST_TRAIN_FILE = Path("Code/train_PatchTST.py")
 
 MANY_TO_ONE_MODEL_FILE = Path("Trained_Models/best_model_Many_to_One.pt")
 SEQ_TO_SEQ_MODEL_FILE = Path("Trained_Models/best_model_Seq_to_Seq.pt")
