@@ -1,14 +1,13 @@
 # Dieses Skript erstellt die Prognosen für die Naivprognose und die Ergebnisse der Modelle auch für den Validierungs-
 # und Testsplit vergeleichbar zu machen.
 
+# Importieren der notwendigen Bibliotheken
 import time
 import json
-import platform
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
 
 
 # ---------------------------------------------------------------------
