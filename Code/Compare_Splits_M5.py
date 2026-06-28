@@ -16,7 +16,6 @@ import matplotlib.pyplot as plt
 # ---------------------------------------------------------------------
 DATA_DIR = Path("data") / "preprocessed"
 CSV_PATH = DATA_DIR / "m5_long.csv"
-PARQUET_PATH = DATA_DIR / "m5_long.parquet"
 
 HORIZON = 28
 SEASONALITY_1 = 1
@@ -140,14 +139,6 @@ def seasonal_naive_baseline(df: pd.DataFrame, split_name: str):
 # ---------------------------------------------------------------------
 # Erstellen von Exportdateien mit den Ergebnissen der Naivprognose
 # ---------------------------------------------------------------------
-def get_system_info() -> dict:
-    return {
-        "python_version": platform.python_version(),
-        "platform": platform.platform(),
-        "processor": platform.processor(),
-        "machine": platform.machine(),
-    }
-
 
 def create_run_folder(base_dir: Path):
     run_dir = base_dir / "Compare_Splits_M5"
@@ -202,31 +193,29 @@ def save_forecast_example(df: pd.DataFrame, split_name: str, out_path: Path, bas
 
 
 # ---------------------------------------------------------------------
-# Main
+# Main Funktion: Hauptfunktion des Skriptes, welches alle weiteren Funktionen aufruft.
 # ---------------------------------------------------------------------
 def main(SPLIT_NAME: str):
     total_start = time.time()
 
+    # Daten einlesen und Information in die Konsole ausgeben
     print("Loading data...")
-
     df = load_data()
 
+    # Konfiguration festlegen - dient nur der Ausgabe im JSON File
     config = {
-        "model": "SeasonalNaiveRepeat7",
-        "data_dir": str(DATA_DIR),
-        "split": SPLIT_NAME,
-        "series": df["series_id"].nunique(),
-        "horizon": HORIZON,
-        "csv_path": str(CSV_PATH),
-        "parquet_path": str(PARQUET_PATH),
-        "mase_denominator": "mean(|y_t - y_{t-7}|) on TRAIN split per series",
+        "model": "SeasonalNaive-7",
+        "data_dir": str(DATA_DIR), # Data/preprocessed Ordnerstruktur
+        "split": SPLIT_NAME, # Val oder Test
+        "series": df["series_id"].nunique(), # Dataframe mit allen Serien 
+        "horizon": HORIZON, # Forecast-Horizont = 28 Tage
+        "csv_path": str(CSV_PATH), # Pfad zu dem m5_long.csv (Traningssubset)
+        "mase_denominator": "mean(|y_t - y_{t-7}|) auf Traningssplit pro Serie",
     }
 
+    # Erstellen von "runs" Ordner wenn noch nicht vorhanden und Speichern der Konfiguration
     run_dir = create_run_folder(RUNS_DIR)
     save_json(run_dir / "config.json", config)
-    save_json(run_dir / "system_info.json", get_system_info())
-
-    #denoms = compute_mase_denominators(df, seasonality=SEASONALITY)
 
     print(f"Evaluating Naive Baseline on split='{SPLIT_NAME}'")
     results_naive = naive_baseline(df, SPLIT_NAME)
@@ -281,16 +270,10 @@ def main(SPLIT_NAME: str):
 
     save_json(run_dir / "summary_seasonal_naive.json", summary_seasonal_naive)
 
-    # Exports
-    #by_horizon_df.to_csv(run_dir / "metrics_by_horizon.csv", index=False)
-
-    #loss_png, metrics_png = save_plots(run_dir, by_horizon_df, results)
-
     # Optional forecast plot
     example_naive = save_forecast_example(df, SPLIT_NAME, run_dir / "forecast_example_native.png", "Naive")
     example_seasonal_naive = save_forecast_example(df, SPLIT_NAME, run_dir / "forecast_example_seasonal_native.png", "Seasonal Naive")
 
-    #print("\nSaved plots:", loss_png, metrics_png)
     if example_naive:
         print("Saved forecast example:", run_dir / "forecast_example.png")
     if example_seasonal_naive:
