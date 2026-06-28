@@ -1,13 +1,6 @@
-# -----------------------------------------------------------------------------
-# Reads the original M5 sales file (sales_train_validation.csv, wide format)
-# and produces an initial EDA + German-labeled plots for a Master's thesis.
-#
-# Adds structure plots: number of states, stores, categories, departments, items
-# and distributions (e.g., series per store / per department / per category).
+# Skript für die Analyse des M5 Roh-Datensatzes 
 
-#
-# -----------------------------------------------------------------------------
-
+# Importieren der notwendigen Bibliotheken
 import json
 import time
 from pathlib import Path
@@ -15,13 +8,17 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-#from scipy import stats
 
-### Constants
+
+# ---------------------------------------------------------------------
+# Allgemeine Konfigurationen
+# ---------------------------------------------------------------------
 # Wähle das Datenset für die Analyse (Full; Sub_Small; Sub_Big)
-Dataset = "Sub_Small"  # "Full", "Sub_Small", "Sub_Big"
+# Diese Aufteilung stammt noch aus der ersten Überlegungung erst ein kleines Optunasubset zu bauen und dann auf dem großen final zu trainieren.
+# Für die Analyse des gesamten Datensatzen funktionert es aber mit Full noch genauso.
+Dataset = "Full"  # "Full", "Sub_Small", "Sub_Big"
 if Dataset == "Full":
-    SALES_FILE = Path("data/raw/sales_train_evaluation.csv")
+    SALES_FILE = Path("data/raw/sales_train_validation.csv")
     NUMBER_OF_SERIES = 30490
 elif Dataset == "Sub_Small":
     SALES_FILE = Path("data/preprocessed/subsets/subset_200_series.csv")
@@ -29,58 +26,68 @@ elif Dataset == "Sub_Small":
 elif Dataset == "Sub_Big":
     SALES_FILE = Path("data/preprocessed/subsets/subset_2000_series.csv")
     NUMBER_OF_SERIES = 2000
-else:
-    raise ValueError(f"Unknown Dataset selection: {Dataset}")
 
 CAL_FILE = Path("data/raw/calendar.csv")
 OUT_BASE = Path("data/Analyse Dataset") / Dataset
 
-
-def create_eda_run_folder():
-    ts = time.strftime("%Y%m%d-%H%M%S")
-    run_name = Dataset + "__" + ts
+# ---------------------------------------------------------------------
+# Ordner erstellen um die ergebnisse zu speichern
+# ---------------------------------------------------------------------
+def create_analyse_raw_data_run_folder():
+    run_name = Dataset
     out = OUT_BASE / run_name
     out.mkdir(parents=True, exist_ok=True)
     return out
 
-
+# ---------------------------------------------------------------------
+# Laden der Sales und Calender Daten
+# ---------------------------------------------------------------------
 def load_sales_and_calendar():
     sales = pd.read_csv(SALES_FILE)
 
     cal = None
-    if CAL_FILE.exists():
-        cal = pd.read_csv(CAL_FILE, usecols=["d", "date"])
-        cal["date"] = pd.to_datetime(cal["date"])
-    else:
-        print("WARN: calendar.csv not found -> plots will use d_* index axis (not calendar dates).")
+    cal = pd.read_csv(CAL_FILE, usecols=["d", "date"])
+    cal["date"] = pd.to_datetime(cal["date"])
 
     return sales, cal
 
+# ---------------------------------------------------------------------
+# Extrahiere die Tagesspalten aus dem Dataframe
+# ---------------------------------------------------------------------
 def get_day_cols(sales: pd.DataFrame) -> list[str]:
     return [i for i in sales.columns if i.startswith("d_")]
 
-
+# ---------------------------------------------------------------------
+# Hilfsfunktion zum Speichern der JSON Files
+# ---------------------------------------------------------------------
 def save_json(path: Path, obj: dict) -> None:
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
 
 
-# ---------------------------- Auswertungen --------------------------------
-# Umwandlung von Wide to Long
+# ---------------------------------------------------------------------
+# Umwandlung von Wide zu Long - Berechnen der Gesamtverkäufe pro Tag über alle Serien hinweg
+# ---------------------------------------------------------------------
 def wide_to_daily_total(sales: pd.DataFrame, d_cols: list[str], cal: pd.DataFrame):
+    # Alle Serien pro Tag summieren - eine Zeile pro Tag
     total = sales[d_cols].sum(axis=0).to_frame("total_sales").reset_index().rename(columns={"index": "d"})
+    # Kalender-Datum mergen damit  echte Datumsangaben angezeigt werden können
     total = total.merge(cal, on="d", how="left")
     total = total.sort_values("date").reset_index(drop=True)
     return total
 
-
+# ---------------------------------------------------------------------
+# Grundlegende Statistiken über alle Serien und Tage berechnen
+# ---------------------------------------------------------------------
 def compute_basic_stats(sales: pd.DataFrame, d_cols: list[str]):
     # Numpy Array der Verkaufszahlen erstellen
     y = sales[d_cols].to_numpy(dtype=np.int32)
 
+    # Pro Serie: Gesamtabsatz, Tagesdurchschnitt, Anteil Null-Tage
     series_sum = y.sum(axis=1)
     series_mean = y.mean(axis=1)
     series_zero_share = (y == 0).mean(axis=1)
 
+    # Sammeln aller relevanten Werte - Zusätzlich noch Quantile erzeugen
     stats = {
         "Anzahl Serien": int(len(sales)),
         "Anzahl Tage": int(len(d_cols)),
@@ -99,23 +106,27 @@ def compute_basic_stats(sales: pd.DataFrame, d_cols: list[str]):
         "Durschnittlicher Anteil von 0 Absatz Tagen (alle Serien)": float(series_zero_share.mean()),
         "Median Anteil von 0 Absatz Tagen (alle Serien)": float(np.median(series_zero_share)),
     }
+
     # Quantile für Absatz pro Tag berechnen
     quantile = np.linspace(0.0, 1.0, 200)
     quantile_values = np.quantile(y, quantile)
 
-    # Erstes Quantil mit positivem Absatz
-    positive_sales = quantile_values > 0
-    first_positive_index = np.argmax(positive_sales)
+    # Erstes Quantil mit positivem Absatz ermitteln
+    positive_sales = quantile_values > 0 
+    first_positive_index = np.argmax(positive_sales)  # Argmax gibt Index des ersten positiven Wertes aus
     first_positive_quantile = quantile[first_positive_index]
    
-    # Schlüsselquantile für das Plotten markieren
+    # Schlüsselquantile für die Ausgabe in der Abbildung markieren
     key_quantile = [0.5, 0.75, 0.9, 0.99, first_positive_quantile]
     key_quantile_values = np.quantile(y, key_quantile)
     return stats, quantile, quantile_values, key_quantile, key_quantile_values
 
-
+# ---------------------------------------------------------------------
+# Funktion zur ermittlung strukturelle Kennzahlen -  States, Stores, Kategorien unsw.
+# ---------------------------------------------------------------------
 def compute_structure_counts(sales: pd.DataFrame):
-    def number_nunique(col: str) -> int | None:
+    # Gibt None zurück wenn eine Spalte nicht existiert z.B. im Subset
+    def number_nunique(col: str):
         return int(sales[col].nunique()) if col in sales.columns else None
 
     counts = {
@@ -128,27 +139,22 @@ def compute_structure_counts(sales: pd.DataFrame):
     return counts
 
 
-# ---------------------------- plotting (German labels) ------------------------
-def _savefig(path: Path):
+# ---------------------------------------------------------------------
+# Hilfsfunktion - Plot speichern und schließen
+# ---------------------------------------------------------------------
+def save_plot(path: Path):
     plt.tight_layout()
     plt.savefig(path, dpi=220)
     plt.close()
 
 
-def plot_total_sales_over_time(daily_total: pd.DataFrame, out_path: Path):
-    plt.figure()
-    if "date" in daily_total.columns and daily_total["date"].notna().any():
-        plt.plot(daily_total["date"], daily_total["total_sales"])
-        plt.xlabel("Datum")
-    else:
-        plt.plot(np.arange(len(daily_total)), daily_total["total_sales"])
-        plt.xlabel("Tag-Index (d_*)")
-    plt.ylabel("Gesamtabsatz (Summe über alle Zeitreihen)")
-    plt.title("M5: Gesamtabsatz über die Zeit (Subset)")
-    plt.grid(True)
-    _savefig(out_path)
+### Anmerkung zu den Plots: Es wurden verschiedene Plots erstellt, die möglicherweise relevant sind und einen Rückschluss auf Besonderheiten des Datensatzes zulassen.
+### Es wurden in der Arbeit aber nur einige wenige davon genutzt. Nichtsdestotrotz bieten diese Abbildungen einen guten Überblick über die Struktur des M5 Datensatzes.
 
 
+# ---------------------------------------------------------------------
+# Abbildung 0: Absatz nach Quantilen
+# ---------------------------------------------------------------------
 def plot_quantile_sales(quantile: list, quantile_values: list, key_quantile: list, key_quantile_values: list, out_path: Path):
     # Erstes Quantil mit positivem Absatz
     positive_sales = quantile_values > 0
@@ -174,10 +180,10 @@ def plot_quantile_sales(quantile: list, quantile_values: list, key_quantile: lis
     # Wichtige Quantile hervorheben
     plt.scatter(key_quantile, key_quantile_values, color="red", zorder=3)
 
-    # Erstes Positiv-Quantil hervorheben
+    # Erstes positives Quantil hervorheben
     plt.scatter([first_positive_quantile], [key_quantile_values[-1]], color="green", zorder=4)
 
-    # Beschriftungen an den Punkten
+    # Beschriftungen mit Pfeilen an den Schlüsselquantilen
     for quantil, value in zip(key_quantile, key_quantile_values):
         xoffset, yoffset = offsets[float(quantil)]
         if(quantil != first_positive_quantile):
@@ -193,7 +199,7 @@ def plot_quantile_sales(quantile: list, quantile_values: list, key_quantile: lis
     plt.title(f"Tägliche Absatzzahlen nach Quantilen ({NUMBER_OF_SERIES} Zeitreihen)")
     plt.grid(True)
 
-    # Textbox für erstes Positiv-Quantil
+    # Textbox für erstes Positiv-Quantil oben Links in der Ecke
     ax = plt.gca()
     ax.text(
         0.02, 0.98,  # x,y in Achsen-Koordinaten
@@ -206,10 +212,31 @@ def plot_quantile_sales(quantile: list, quantile_values: list, key_quantile: lis
         bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="green", alpha=0.9),
         zorder=10
     )
-    _savefig(out_path)
+    save_plot(out_path)
 
 
+# ---------------------------------------------------------------------
+# Abbildung 1: Gesamter Absatz über die Zeit
+# ---------------------------------------------------------------------
+def plot_total_sales_over_time(daily_total: pd.DataFrame, out_path: Path):
+    plt.figure()
+    # Echtes Datum nehmen wenn vorhanden, sonst einfach den Tag-Index
+    if "date" in daily_total.columns and daily_total["date"].notna().any():
+        plt.plot(daily_total["date"], daily_total["total_sales"])
+        plt.xlabel("Datum")
+    else:
+        plt.plot(np.arange(len(daily_total)), daily_total["total_sales"])
+        plt.xlabel("Tag-Index (d_*)")
+    plt.ylabel("Gesamtabsatz (Summe über alle Zeitreihen)")
+    plt.title("Gesamtabsatz über die Zeit")
+    plt.grid(True)
+    save_plot(out_path)
+
+# ---------------------------------------------------------------------
+# Abbildung 2: Gesamtabsatz pro Zeitreihe
+# ---------------------------------------------------------------------
 def plot_total_sales_histogram(sales: pd.DataFrame, d_cols: list[str], out_path: Path):
+    # Gesamtabsatz pro Serie über alle Tage summieren
     totals = sales[d_cols].sum(axis=1).to_numpy(dtype=np.float32)
     plt.figure()
     plt.hist(totals, bins=60)
@@ -217,11 +244,14 @@ def plot_total_sales_histogram(sales: pd.DataFrame, d_cols: list[str], out_path:
     plt.ylabel("Anzahl Zeitreihen")
     plt.title("Verteilung: Gesamtabsatz pro Zeitreihe")
     plt.grid(True)
-    _savefig(out_path)
+    save_plot(out_path)
 
-
+# ---------------------------------------------------------------------
+# Abbildung 3: Null-Anteils je Zeitreihe (Sparsity) anzeigen
+# ---------------------------------------------------------------------
 def plot_zero_share_histogram(sales: pd.DataFrame, d_cols: list[str], out_path: Path):
     y = sales[d_cols].to_numpy(dtype=np.float32)
+    # Anteil der Tage mit 0 Verkäufen pro Serie – in Prozent
     zero_share = (y == 0).mean(axis=1)*100  # in %
     plt.figure()
     plt.hist(zero_share, bins=50)
@@ -229,30 +259,37 @@ def plot_zero_share_histogram(sales: pd.DataFrame, d_cols: list[str], out_path: 
     plt.ylabel("Anzahl Zeitreihen")
     plt.title("Sparsity: Anteil an Tagen mit 0 Absatz je Zeitreihe")
     plt.grid(True)
-    _savefig(out_path)
+    save_plot(out_path)
 
-
-def plot_top_series_bars(sales: pd.DataFrame, d_cols: list[str], out_path: Path, k: int = 20):
+# ---------------------------------------------------------------------
+# Abbildung 4: Besten 20 Zeitreihen nach Gesamtabsatz
+# ---------------------------------------------------------------------
+def plot_top_series_bars(sales: pd.DataFrame, d_cols: list[str], out_path: Path):
     totals = sales[d_cols].sum(axis=1)
-    top = totals.sort_values(ascending=False).head(k)
+    top = totals.sort_values(ascending=False).head(20)
+    # ID-Spalte als Label nehmen wenn vorhanden, sonst Index-Nummer
     labels = sales.loc[top.index, "id"].astype(str).tolist() if "id" in sales.columns else [str(i) for i in top.index]
 
     plt.figure(figsize=(10, 6))
     plt.barh(range(len(top))[::-1], top.values[::-1])
     plt.yticks(range(len(top))[::-1], labels[::-1], fontsize=8)
     plt.xlabel("Gesamtabsatz")
-    plt.title(f"Top-{k} Zeitreihen nach Gesamtabsatz")
+    plt.title(f"Top-{20} Zeitreihen nach Gesamtabsatz")
     plt.grid(True, axis="x")
-    _savefig(out_path)
+    save_plot(out_path)
 
-
+# ---------------------------------------------------------------------
+# Abbildung 5: Gesamtabsatz nach Bundesstaat
+# ---------------------------------------------------------------------
 def plot_state_totals_over_time(
     sales: pd.DataFrame, d_cols: list[str], cal: pd.DataFrame, out_path: Path):
     if "state_id" not in sales.columns:
         return
-
+    
+    # Alle Serien pro State und Tag summieren
     by_state = sales.groupby("state_id")[d_cols].sum()
-
+    
+    # Echtes Datum aus Kalender holen wenn möglich
     if cal is not None and cal["date"].notna().any():
         x = cal.set_index("d").loc[d_cols, "date"].values
         xlabel = "Datum"
@@ -268,21 +305,25 @@ def plot_state_totals_over_time(
     plt.title("Gesamtabsatz über die Zeit nach Bundesstaat")
     plt.grid(True)
     plt.legend()
-    _savefig(out_path)
+    save_plot(out_path)
 
-
+# ---------------------------------------------------------------------
+# Abbildung 6: Durchschnittlicher Absatz pro Wochentag ermitteln
+# ---------------------------------------------------------------------
 def plot_weekly_seasonality_avg(sales: pd.DataFrame, cal: pd.DataFrame | None, d_cols: list[str], out_path: Path):
     if cal is None or not {"d", "date"}.issubset(cal.columns):
         return
-
+   
+    # Tagesgesamtabsatz berechnen und mit Kalender mergen um Wochentag zu bekommen
     totals = sales[d_cols].sum(axis=0).to_frame("total_sales").reset_index().rename(columns={"index": "d"})
     totals = totals.merge(cal, on="d", how="left").dropna(subset=["date"])
     totals["weekday"] = totals["date"].dt.day_name()
 
+    # Mittelwert pro Wochentag in richtiger Reihenfolge - Tage auf Englisch da die Funktion dt.day_name() (eine Zeile weiter oben nur mit enlischen Tagen arbeitet)
     order = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-    g = totals.groupby("weekday")["total_sales"].mean().reindex(order)
+    group_week_sales = totals.groupby("weekday")["total_sales"].mean().reindex(order)
 
-    # translate weekday labels to German
+    # Englische Wochentage ins Deutsche übersetzen
     german = {
         "Monday": "Montag",
         "Tuesday": "Dienstag",
@@ -292,46 +333,25 @@ def plot_weekly_seasonality_avg(sales: pd.DataFrame, cal: pd.DataFrame | None, d
         "Saturday": "Samstag",
         "Sunday": "Sonntag",
     }
-    labels = [german.get(x, x) for x in g.index]
+    labels = [german.get(x, x) for x in group_week_sales.index]
 
     plt.figure()
-    plt.bar(np.arange(len(g)), g.values)
-    plt.xticks(np.arange(len(g)), labels, rotation=30, ha="right")
+    plt.bar(np.arange(len(group_week_sales)), g.values)
+    plt.xticks(np.arange(len(group_week_sales)), labels, rotation=30, ha="right")
     plt.ylabel("Durchschnittlicher Gesamtabsatz")
     plt.title("Wochensaisonalität: Durchschnittlicher Gesamtabsatz nach Wochentag")
     plt.grid(True, axis="y")
-    _savefig(out_path)
+    save_plot(out_path)
 
-
-# -------------------------  structure plots -------------------------------
-def plot_structure_overview_bar(struct_counts: dict, out_path: Path):
-    # filter None values if columns are missing
-    keys = [k for k, v in struct_counts.items() if v is not None]
-    vals = [struct_counts[k] for k in keys]
-
-    # nicer x labels in German
-    label_map = {
-        "n_states": "Bundesstaaten",
-        "n_stores": "Stores",
-        "n_categories": "Kategorien",
-        "n_departments": "Departments",
-        "n_items": "Items",
-    }
-    xlabels = [label_map.get(k, k) for k in keys]
-
-    plt.figure()
-    plt.bar(np.arange(len(vals)), vals)
-    plt.xticks(np.arange(len(vals)), xlabels, rotation=25, ha="right")
-    plt.ylabel("Anzahl")
-    plt.title("Strukturübersicht: Anzahl von Hierarchie-Entitäten (im Subset)")
-    plt.grid(True, axis="y")
-    _savefig(out_path)
-
-
-def plot_distribution_count_by_group(sales: pd.DataFrame, group_col: str, out_path: Path, top_k: int = 25):
+# ---------------------------------------------------------------------
+# Abbildung 07-10: Anzahl Zeitreihen je Gruppe State, Store, Produktkategorie unsw.
+# ---------------------------------------------------------------------
+def plot_distribution_count_by_group(sales: pd.DataFrame, group_col: str, out_path: Path):
     if group_col not in sales.columns:
         return
-    counts = sales[group_col].value_counts().head(top_k).sort_values(ascending=True)
+    
+    # Die besten Elemente heraussuchen (Anzahl Serien)
+    counts = sales[group_col].value_counts().head(10).sort_values(ascending=True)
 
     title_map = {
         "store_id": "Zeitreihen je Store (Top)",
@@ -353,11 +373,12 @@ def plot_distribution_count_by_group(sales: pd.DataFrame, group_col: str, out_pa
     plt.ylabel(xlabel_map.get(group_col, group_col))
     plt.title(title_map.get(group_col, f"Zeitreihen je {group_col} (Top)"))
     plt.grid(True, axis="x")
-    _savefig(out_path)
+    save_plot(out_path)
 
-
+# ---------------------------------------------------------------------
+# Abbildung 10: Anzahl der unterschiedlichen Produkte pro Produktkategorie
+# ---------------------------------------------------------------------
 def plot_items_per_category(sales: pd.DataFrame, out_path: Path):
-    # unique items per category
     if "cat_id" not in sales.columns or "item_id" not in sales.columns:
         return
 
@@ -369,33 +390,23 @@ def plot_items_per_category(sales: pd.DataFrame, out_path: Path):
     plt.ylabel("Kategorie")
     plt.title("Anzahl unterschiedlicher Items je Kategorie")
     plt.grid(True, axis="x")
-    _savefig(out_path)
+    save_plot(out_path)
 
 
-def plot_departments_per_store(sales: pd.DataFrame, out_path: Path):
-    if "store_id" not in sales.columns or "dept_id" not in sales.columns:
-        return
-    tmp = sales.groupby("store_id")["dept_id"].nunique().sort_values(ascending=True)
-    plt.figure(figsize=(10, 6))
-    plt.barh(range(len(tmp)), tmp.values)
-    plt.yticks(range(len(tmp)), tmp.index.astype(str).tolist(), fontsize=8)
-    plt.xlabel("Anzahl Departments")
-    plt.ylabel("Store")
-    plt.title("Anzahl Departments je Store")
-    plt.grid(True, axis="x")
-    _savefig(out_path)
-
-
-# ---------------------------- exports -----------------------------------------
+# ---------------------------------------------------------------------
+# Funktion für den Export der Serieninformationen als Tabelle (CSV)
+# ---------------------------------------------------------------------
 def export_series_stats_table(sales: pd.DataFrame, d_cols: list[str], out_path: Path):
     y = sales[d_cols].to_numpy(dtype=np.float32)
-    totals = y.sum(axis=1)
-    mean = y.mean(axis=1)
-    zero_share = (y == 0).mean(axis=1)
+    
+    totals = y.sum(axis=1) # Summe
+    mean = y.mean(axis=1)  # Durchschnitt
+    zero_share = (y == 0).mean(axis=1) # Null-Anteil
 
     cols = ["id", "item_id", "dept_id", "cat_id", "store_id", "state_id"]
     keep = [c for c in cols if c in sales.columns]
 
+    # Kopiere das DF Sales und behalte nur die Spalten aus Cols
     out = sales[keep].copy()
     out["series_total_sales"] = totals
     out["series_daily_mean"] = mean
@@ -404,31 +415,24 @@ def export_series_stats_table(sales: pd.DataFrame, d_cols: list[str], out_path: 
     out.to_csv(out_path, index=False)
 
 
-# ---------------------------- main --------------------------------------------
+# ---------------------------------------------------------------------
+# Hauptfuntion des Skriptes welches alle Funktionen ausführt
+# ---------------------------------------------------------------------
 def main():
     # Ordner erstellen
-    run_dir = create_eda_run_folder()
+    run_dir = create_analyse_raw_data_run_folder()
 
-    # Daten laden
+    # Rohdaten laden
     sales, cal = load_sales_and_calendar()
 
-    # Tags-Spalten identifizieren
+    # Tagesspalten identifizieren (d_1, d_2, ...)
     d_cols = get_day_cols(sales)
 
     # Auswertungen starten
     basic_stats, quantiles, quantile_values, key_quantile, key_quantile_values = compute_basic_stats(sales, d_cols)
     struct_counts = compute_structure_counts(sales)
 
-    config = {
-        "source_sales_file": str(SALES_FILE),
-        "source_calendar_file": str(CAL_FILE),
-        "n_series_in_raw": int(len(sales)),
-        "n_series_in_subset": int(len(sales)),
-        "n_days": int(len(d_cols)),
-    }
-
     # Speichern der Ergebnisse als JSON
-    save_json(run_dir / "config.json", config)
     save_json(run_dir / "summary_basic_stats.json", basic_stats)
     save_json(run_dir / "summary_structure_counts.json", struct_counts)
 
@@ -441,29 +445,18 @@ def main():
     plot_quantile_sales(quantiles, quantile_values, key_quantile, key_quantile_values, run_dir / "00_quantile_absatz_pro_tag.png")
     plot_total_sales_over_time(daily_total, run_dir / "01_gesamtabsatz_ueber_zeit.png")
     plot_total_sales_histogram(sales, d_cols, run_dir / "02_verteilung_gesamtabsatz_je_zeitreihe.png")
-    #plot_total_sales_normal_distribution(sales, d_cols, run_dir / "02b_normalverteilung_gesamtabsatz_je_zeitreihe.png")
     plot_zero_share_histogram(sales, d_cols, run_dir / "03_verteilung_nullanteil_je_zeitreihe.png")
     plot_top_series_bars(sales, d_cols, run_dir / "04_top20_zeitreihen_nach_gesamtabsatz.png", k=20)
     plot_state_totals_over_time(sales, d_cols, cal, run_dir / "05_gesamtabsatz_nach_bundesstaat_ueber_zeit.png")
     plot_weekly_seasonality_avg(sales, cal, d_cols, run_dir / "06_wochensaisonalitaet_nach_wochentag.png")
-    plot_structure_overview_bar(struct_counts, run_dir / "07_strukturuebersicht_anzahlen.png")
-    plot_distribution_count_by_group(sales, "state_id", run_dir / "08_zeitreihen_je_bundesstaat.png", top_k=10)
-    plot_distribution_count_by_group(sales, "store_id", run_dir / "09_zeitreihen_je_store_top25.png", top_k=25)
-    plot_distribution_count_by_group(sales, "cat_id", run_dir / "10_zeitreihen_je_kategorie.png", top_k=20)
-    plot_distribution_count_by_group(sales, "dept_id", run_dir / "11_zeitreihen_je_department_top25.png", top_k=25)
-    plot_items_per_category(sales, run_dir / "12_items_je_kategorie.png")
-    plot_departments_per_store(sales, run_dir / "13_departments_je_store.png")
+    plot_distribution_count_by_group(sales, "state_id", run_dir / "07_zeitreihen_je_bundesstaat.png", top_k=10)
+    plot_distribution_count_by_group(sales, "store_id", run_dir / "08_zeitreihen_je_store_top25.png", top_k=25)
+    plot_distribution_count_by_group(sales, "cat_id", run_dir / "09_zeitreihen_je_kategorie.png", top_k=20)
+    plot_distribution_count_by_group(sales, "dept_id", run_dir / "10_zeitreihen_je_department_top25.png", top_k=25)
+    plot_items_per_category(sales, run_dir / "11_items_je_kategorie.png")
 
-    print("\nAnalysing finished. Outputs saved to:")
+    print("\nAnalyse beendet. Daten unter gespeichert unter:")
     print(run_dir.resolve())
-
-    print("\nKey basic stats:")
-    for k, v in basic_stats.items():
-        print(f"  {k}: {v}")
-
-    print("\nStructure counts:")
-    for k, v in struct_counts.items():
-        print(f"  {k}: {v}")
 
 if __name__ == "__main__":
     main()
