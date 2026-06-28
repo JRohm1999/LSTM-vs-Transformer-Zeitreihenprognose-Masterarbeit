@@ -1,7 +1,4 @@
-# run_logger.py
-# -----------------------------------------------------------------------------
-# Zweck dieses Skriptes:
-#   Diese Datei enthält Hilfsfunktionen für Logging in den Hauptskripten zum Traning und Testen der Modelle.
+# Dieses Skript enthält Hilfsfunktionen für Logging in den Hauptskripten zum Traning und Testen der Modelle.
 
 # Importieren sämtlicher Bibliotheken die für die Funktionen gebracht werden
 import json
@@ -13,20 +10,25 @@ from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 
+# ------------------------------------------------------------
+# nicht benötigt
+# ------------------------------------------------------------
+# def _make_folder_safe(text):
 
-def _make_folder_safe(text):
-    # Diese Funktion erzeugt einen dateisystemfreundlichen String.
-    # Sonderzeichen werden ersetzt, um Probleme bei der Ordnererstellung zu vermeiden.
-    text = str(text)
-    out = []
-    for ch in text:
-        if ch.isalnum() or ch in "-_=.+":
-            out.append(ch)
-        else:
-            out.append("_")
-    return "".join(out)
+#     text = str(text)
+#     out = []
+#     for ch in text:
+#         if ch.isalnum() or ch in "-_=.+":
+#             out.append(ch)
+#         else:
+#             out.append("_")
+#     return "".join(out)
 
-# Systeminfos sammeln und zurückgeben
+
+
+# ------------------------------------------------------------
+# Sammeln von Systeminformationen beim Traning der Modelle
+# ------------------------------------------------------------
 def get_system_info():
     # Es werden Systeminformationen gesammelt, die für eine Reproduktion der Ergebnisse
     # relevant sein können. Dies ist insbesondere bei GPU-Training sinnvoll.
@@ -49,14 +51,16 @@ def get_system_info():
 
     return info
 
-# Sichern eines JSON Files 
+# ------------------------------------------------------------
+# Allgemeine Funktion zum speichern eines JSON Files
+# ------------------------------------------------------------
 def save_json(path, data):
-    # Speicherung einer Python-Datenstruktur im JSON-Format.
-    # Das Format ist für Menschen lesbar und für spätere Analysen einfach nutzbar.
     path = Path(path)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
-# Sichern einer Excel-Datei
+# ------------------------------------------------------------
+# Allgemeine Funktion zum speichern einer Excel
+# ------------------------------------------------------------
 def save_excel(run_dir, config, epoch_rows, summary):
     run_dir = Path(run_dir)
     out_path = run_dir / "metrics.xlsx"
@@ -72,7 +76,9 @@ def save_excel(run_dir, config, epoch_rows, summary):
 
     return out_path
 
-# Erstellung einfacher Visualisierungen des Trainingsverlaufs mit Plots
+# ------------------------------------------------------------
+# Funktion zum Speichern von Plots über den Metrik-Verlauf
+# ------------------------------------------------------------
 def save_plots(run_dir, epoch_rows):
     run_dir = Path(run_dir)
     df = pd.DataFrame(epoch_rows)
@@ -80,7 +86,7 @@ def save_plots(run_dir, epoch_rows):
     if df.empty:
         return
 
-    # Plot 1: Loss-Verlauf
+    # Plot 1: Loss-Verlauf (Traningsloss)
     if "train_loss" in df.columns or "val_loss" in df.columns:
         plt.figure()
 
