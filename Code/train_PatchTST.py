@@ -1,3 +1,7 @@
+#Traningsskript für den PatchTST
+
+# Import der nötigen Biliotheken
+# Identisch zu den anderen Modellen wird Pytorch verwendet
 import json
 import math
 import time
@@ -27,6 +31,7 @@ from lightning.pytorch.loggers import CSVLogger
 from pytorch_forecasting import TimeSeriesDataSet
 from pytorch_forecasting.data import GroupNormalizer
 
+# Import von Funktionen aus dem Logging Skript
 from run_logger import get_system_info, save_excel, save_json, save_plots
 
 
@@ -39,58 +44,65 @@ RUNS_DIR = Path("runs") / "patchtst"
 
 
 # -----------------------------------------------------------------------------
-# Trainingsumfang / Device
+# Trainingdetails
 # -----------------------------------------------------------------------------
+# Traning der Modelle auf der Grafiskkarte (GPU) wenn möglich. Wenn keine GPU vorhanden wird CPU genutzt
 DEVICE = "gpu" if torch.cuda.is_available() else "cpu"
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
+# Seeds: Anzahl an Traningsläufen mit der identischen Hyperparameterkonfiguration | BASE_SEED = Random Initialisierung | NUM_SEEDS = Anzahl an SEEDS (Trainingsläufen)
 BASE_SEED = 1
 NUM_SEEDS = 3
 MAX_SERIES = 1000
 
+# Encoder = 56 Tage Lookback, PRED_LEN = 28 Prognosezeitraum
 ENCODER_LEN = 56
 PRED_LEN = 28
 HORIZON = PRED_LEN
-MAX_EPOCHS = 40
+
+# Anzahl der maximalen Traingsepochen pro Run (Seed). Wird ggf. durch PATIENCE (Early Stopping) vorher beendet.
+MAX_EPOCHS = 50
 
 # -----------------------------------------------------------------------------
-# Modell-Hyperparameter
+# Hyperparameter (finale Traningsparameter nach Optunaläufen)
+# Fixe Hyperparameter, gesteuerte Parameter durch Optuna in suggest_hyperparameters Funktion
 # -----------------------------------------------------------------------------
 BATCH_SIZE = 1024
 LR = 0.0006559644071632867
-D_MODEL = 128
+D_MODEL = 128   # Synonym für Hidden Size
 ATTN_HEAD_SIZE = 2
 HIDDEN_CONT_SIZE = int(D_MODEL/2)
 DROPOUT = 0.10827211824776498
 
+# Patch Len und Stride sind PatchTST spezifische Parameter, die für das Patching (Zusammenfassen), der Historie verantwortlich sind
 PATCH_LEN = 16
 PATCH_STRIDE = 8
 NUM_TRANSFORMER_LAYERS = 3
 SERIES_EMB_DIM = 16 # Anzahl der Embeding Features
 
-LR_PATIENCE = 3
-PATIENCE = 10
-MIN_DELTA = 0.001
-LR_MIN = 1e-6           # Untergrenze
+#Learningrate spezifische Parameter
+LR_PATIENCE = 3     # nach x Läufen ohne Verbesserung wird LR reduziert
+LR_Factor = 0.5     # Faktor zur Verringerung der LR bei erreichen der LR_Patience. z.B. LR 0.3 wird zu LR 0.15 usw. Bis minimal LR_Min erreicht ist.
+PATIENCE = 10       # allgemeine Patience für Abbruch des Tranings nach x Läufen ohne Verbesserung
+MIN_DELTA = 0.001   # Mindestverbesserung des Losses pro Epoche für eine Verbesserung
+LR_MIN = 1e-6       # Untergrenze der Learningrate
 
 
 # -----------------------------------------------------------------------------
-# Optuna
+# Optuna-Konfiguration
 # -----------------------------------------------------------------------------
-USE_OPTUNA = False
-OPTUNA_TRIALS = None
-OPTUNA_TIMEOUT_SEC = 43200
-OPTUNA_SEEDS_PER_TRIAL = 1
-OPTUNA_DIRECTION = "minimize"
+USE_OPTUNA = False # Bei False wird normal traniert, bei True wird Optunasuchlauf durchgefürt
+OPTUNA_TRIALS = None   # Anzahl an Trials, hier über Zeit gesteuert daher None
+OPTUNA_TIMEOUT_SEC = 43200  # Anzahl der Sekunden für den Optunalauf, hier 12 Stunden
+OPTUNA_SEEDS_PER_TRIAL = 1  # Seeds per Trial, hier 1 um Computeaufwand im Rahmen der Arbeit zu halten
+OPTUNA_DIRECTION = "minimize" # Aufgabe von Optuna: Loss reduzieren
 
 
 # -----------------------------------------------------------------------------
 # Feature-Konfiguration
-# performant: native TimeSeriesDataSet-Logik
-# vergleichbar: gleiche Kernfeatures wie LSTM (inkl. lag_1, lag_14, rolling std)
 # -----------------------------------------------------------------------------
-LAG_LIST = [1, 7, 14, 28]
-ROLLING_WINDOWS = [7, 28]
+LAG_LIST = [1, 7, 14, 28] # LagListe für Features
+ROLLING_WINDOWS = [7, 28] # Rollingliste für Features
 
 KNOWN_REAL_FEATURES = [
     "price_s",
@@ -101,11 +113,11 @@ KNOWN_REAL_FEATURES = [
     "year_s",
     "has_event_1",
     "has_event_2",
-]
+] # KNOWN_REAL_FEATURES = Dem Modell bekannte Features aus der Vergangenheit oder bekannte Informationen aus der Zukunft. 
 
 STATIC_CATEGORICALS = ["item_id", "store_id", "state_id"]
 
-
+# Funktion um Seed zu erzeugen 
 def set_seed(seed: int) -> None:
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -114,14 +126,14 @@ def set_seed(seed: int) -> None:
     pl.seed_everything(seed, workers=False)
 
 
-
+# Funktion um die Preprocessed Daten aus der CSV (Subset) zu laden.
 def load_preprocessed() -> pd.DataFrame:
     if not CSV_PATH.exists():
         raise FileNotFoundError("Keine vorverarbeitete Datei gefunden (m5_long.csv).")
     return pd.read_csv(CSV_PATH, parse_dates=["date"])
 
 
-
+# Hinzufügen der Zeitbasierten Features (Lag, Rolling)
 def add_time_series_features(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df = df.sort_values(["series_id", "time_idx"]).reset_index(drop=True)
@@ -153,7 +165,7 @@ def add_time_series_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-
+# Feature Spalten erstellen, Ausgabe der Known Features und der Unknown Features
 def build_feature_columns() -> tuple[list, list]:
     unknown_reals = ["y_log"]
     unknown_reals += [f"y_log_lag_{lag}" for lag in LAG_LIST]
@@ -162,7 +174,7 @@ def build_feature_columns() -> tuple[list, list]:
     return KNOWN_REAL_FEATURES.copy(), unknown_reals
 
 
-
+# MASE Nenner berechnen: MASE besteht aus MAE Prognosemodell /MAE (Naivprognose) 
 def compute_mase_denominators(train_df: pd.DataFrame, seasonality: int = 7) -> dict:
     denominators = {}
     for series_id, group in train_df.groupby("series_id"):
@@ -172,15 +184,16 @@ def compute_mase_denominators(train_df: pd.DataFrame, seasonality: int = 7) -> d
         else:
             y_values = np.expm1(group["y_log"].to_numpy(dtype=np.float32))
 
+         # Für sehr kurze Serien (länger als die Saisonalität) wird der Denominator auf 1 gesetzt, um Division durch Null zu vermeiden.
         if len(y_values) <= seasonality:
             denominators[str(series_id)] = 1.0
             continue
-
+        
+        # Abweichung von "heute" zu vor sieben Tagen (was der Naivprognose entspricht)
         diffs = np.abs(y_values[seasonality:] - y_values[:-seasonality])
         denom = float(np.mean(diffs)) if np.mean(diffs) > 0 else 1.0
         denominators[str(series_id)] = denom
     return denominators
-
 
 
 def get_series_id_mapping(training_ds: TimeSeriesDataSet):
@@ -197,7 +210,6 @@ def get_series_id_mapping(training_ds: TimeSeriesDataSet):
             if classes is not None:
                 mapping = {int(i): str(v) for i, v in enumerate(classes)}
     return mapping
-
 
 
 def extract_series_ids_from_raw_x(raw_x, series_mapping) -> np.ndarray:
@@ -233,7 +245,7 @@ def extract_series_ids_from_raw_x(raw_x, series_mapping) -> np.ndarray:
     return np.asarray(series_ids, dtype=object)
 
 
-
+# Funktion um aus dem Probabilistic-Forecast einen Punkt-Forecast zu erstellen
 def extract_point_forecast(prediction_array: np.ndarray) -> np.ndarray:
     predictions = np.asarray(prediction_array)
     if predictions.ndim == 3 and predictions.shape[2] > 1:
@@ -243,12 +255,12 @@ def extract_point_forecast(prediction_array: np.ndarray) -> np.ndarray:
     return predictions
 
 
-
+# Berechne den Loss für MSE im Log Space (Traningsmetrik)
 def eval_loss_logspace_from_arrays(pred_y_log: np.ndarray, true_y_log: np.ndarray) -> float:
     return float(np.mean((pred_y_log - true_y_log) ** 2))
 
-
-
+# Berechne die Bewertungsmetriken MASE, MSE, und WAPE gesamt als auch auf wöchentlicher Basis 
+#(wöchentliche Berechnung ist für die Evaluation nach dem Traning nicht unbedingt nötig, ist aber vollständigkeitshalber hier erhalten geblieben)
 def eval_mase_mse_wape_weekly_from_arrays(pred_y, true_y, series_ids, mase_denoms):
     week_slices = [(0, 7), (7, 14), (14, 21), (21, 28)]
 
@@ -259,19 +271,28 @@ def eval_mase_mse_wape_weekly_from_arrays(pred_y, true_y, series_ids, mase_denom
     true_y = np.clip(true_y, a_min=0.0, a_max=None)
 
     abs_err = np.abs(pred_y - true_y)
+
+    # MSE
     mse = float(np.mean((pred_y - true_y) ** 2))
 
+    # Nenner für MASE Berechnung, also Funktion mase_denoms aufrufen.
     den = np.array([float(mase_denoms.get(str(series_id), 1.0)) for series_id in series_ids], dtype=np.float32)
     den = np.where(den > 0, den, 1.0)
 
+    # MAE des Modellforecasts
     mae_overall = np.mean(abs_err, axis=1)
+
+    # MASE Berechnung: MAE (Modell) / MAE (Nativprognose)
     mase = float(np.mean(mae_overall / den))
 
+    # MASE Wochenberechnung
     mase_weeks = []
     for start, end in week_slices:
         mae_week = np.mean(abs_err[:, start:end], axis=1)
         mase_weeks.append(float(np.mean(mae_week / den)))
 
+    
+    # WAPE Berechnung
     wape_num = float(np.sum(abs_err))
     wape_den = float(np.sum(true_y))
     wape = (wape_num / wape_den) if wape_den > 0 else float("nan")
@@ -282,6 +303,7 @@ def eval_mase_mse_wape_weekly_from_arrays(pred_y, true_y, series_ids, mase_denom
         den_w = float(np.sum(true_y[:, start:end]))
         wape_weeks.append((num / den_w) if den_w > 0 else float("nan"))
 
+    # Rückgabe aller Lossmetriken
     return {
         "mase": mase,
         "mase_w1": mase_weeks[0],
@@ -307,7 +329,6 @@ def quantile_loss(prediction: torch.Tensor, target: torch.Tensor, quantiles: lis
     return stacked_losses.mean()
 
 
-
 def move_batch_to_device(batch, device):
     if isinstance(batch, dict):
         return {key: move_batch_to_device(value, device) for key, value in batch.items()}
@@ -318,7 +339,7 @@ def move_batch_to_device(batch, device):
     return batch
 
 
-
+# Python Klasse für den PatchTST Encoderblock
 class PatchTSTEncoderBlock(nn.Module):
     def __init__(self, d_model: int, attention_head_size: int, dropout: float, ff_d_model: int):
         super().__init__()
@@ -352,7 +373,7 @@ class PatchTSTEncoderBlock(nn.Module):
         return hidden_states, attention_weights
 
 
-
+# Python Klasse für das PatchTST Modell (Basis ist PyTorch Lightning Framework)
 class PatchTSTModel(pl.LightningModule):
     def __init__(
         self,
@@ -374,8 +395,9 @@ class PatchTSTModel(pl.LightningModule):
         quantiles: list[float] | None = None,
     ):
         super().__init__()
-        self.save_hyperparameters(ignore=["mase_denoms", "series_mapping", "feature_names"])
 
+        # Festlegen der verschieden Parameter des Modells
+        self.save_hyperparameters(ignore=["mase_denoms", "series_mapping", "feature_names"])
         self.input_dim = int(input_dim)
         self.horizon = int(horizon)
         self.num_series = int(num_series)
@@ -423,6 +445,7 @@ class PatchTSTModel(pl.LightningModule):
         self._val_series_batches = []
         self._last_attention_weights = None
 
+    # Erstellen der Patches - Besonderheit des PatchTST Modells.
     def make_patches(self, encoder_cont: torch.Tensor, series_ids: torch.Tensor) -> torch.Tensor:
         encoder_cont = self.input_norm(encoder_cont)
         series_emb = self.series_embedding(series_ids).unsqueeze(1).expand(-1, encoder_cont.size(1), -1)
@@ -436,6 +459,7 @@ class PatchTSTModel(pl.LightningModule):
         patches = patches.contiguous().permute(0, 1, 3, 2).reshape(encoder_inputs.size(0), -1, self.patch_len * encoder_inputs.size(2))
         return patches
 
+    # Funktion des Forwardpasses (Erstellung der Prognose)
     def forward(self, x: dict) -> dict:
         encoder_cont = x["encoder_cont"].float()
 
@@ -477,6 +501,7 @@ class PatchTSTModel(pl.LightningModule):
         self._val_true_batches = []
         self._val_series_batches = []
 
+    # Funktion eines Traningsschrittes
     def training_step(self, batch, batch_idx):
         x, y = batch
         if isinstance(y, (tuple, list)):
@@ -560,7 +585,7 @@ class PatchTSTModel(pl.LightningModule):
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode="min",
-            factor=0.5,
+            factor=LR_Factor,
             patience=LR_PATIENCE,
             threshold=MIN_DELTA,
             threshold_mode="abs",
@@ -600,7 +625,7 @@ def build_timeseries_datasets(df: pd.DataFrame):
 
     train_cutoff = int(df.loc[df["split"] == "train", "time_idx"].max())
     val_cutoff = int(df.loc[df["split"] == "val", "time_idx"].max())
-    test_cutoff = int(df.loc[df["split"] == "test", "time_idx"].max())
+    #test_cutoff = int(df.loc[df["split"] == "test", "time_idx"].max())
 
     training = TimeSeriesDataSet(
         df[df.time_idx <= train_cutoff],
@@ -615,7 +640,7 @@ def build_timeseries_datasets(df: pd.DataFrame):
         time_varying_known_reals=known_reals,
         time_varying_unknown_reals=unknown_reals,
         target_normalizer=GroupNormalizer(groups=["series_id"]),
-        add_relative_time_idx=False,  # diese drei speziellen Features für den TFT werden nicht aktiviert um eine bessere Vergleichbarkeit der Modelle zu gewährleisten.
+        add_relative_time_idx=False,  # diese drei speziellen Features für den PatchTST werden nicht aktiviert um eine bessere Vergleichbarkeit der Modelle zu gewährleisten.
         add_target_scales=False,
         add_encoder_length=False,
         allow_missing_timesteps=False,
@@ -629,22 +654,11 @@ def build_timeseries_datasets(df: pd.DataFrame):
         min_prediction_idx=train_cutoff + 1,
     )
 
-    # test = TimeSeriesDataSet.from_dataset(
-    #     training,
-    #     df[df.time_idx <= test_cutoff],
-    #     predict=True,
-    #     stop_randomization=True,
-    #     min_prediction_idx=val_cutoff + 1,
-    # )
 
-    return training, validation, #test
+    return training, validation
 
 
-# def save_forecast_example(model, test_loader, out_path: Path) -> None:
-#     pass
-
-
-
+# Funktion mit der der Optunasuchlauf gesteuert wird. Enthält den gesamten Optuna Suchraum, auch vorgestellt in der Arbeit.
 def suggest_hyperparameters(optuna_trial: optuna.Trial) -> dict:
     return {
         "learning_rate": optuna_trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True),
@@ -654,8 +668,7 @@ def suggest_hyperparameters(optuna_trial: optuna.Trial) -> dict:
         "num_transformer_layers": optuna_trial.suggest_categorical("num_transformer_layers", [2, 3]), # wie viele Transformer-Blöcke gestapelt werden. 
     }
 
-
-
+# Funktion um die Metrikausgabe zu sortieren
 def reorder_metrics_columns(metrics_dataframe: pd.DataFrame) -> pd.DataFrame:
     column_order = [
         "epoch",
@@ -713,7 +726,7 @@ def collect_predictions(model: PatchTSTModel, dataloader, series_mapping, device
     }
 
 
-
+# Funktion die einen kompletten Traningsdurchlauf für einen Seed enthält. 
 def train_one_seed(
     df: pd.DataFrame,
     mase_denoms: dict,
@@ -721,6 +734,7 @@ def train_one_seed(
     seed_value: int,
     hpo_params: dict | None = None,
 ) -> dict:
+    # Hyperparameter kommen entweder aus der Konfigration oder werden durch Optuna geliefert (siehe nächste If-Schleife)
     learning_rate = LR
     d_model = D_MODEL
     attention_head_size = ATTN_HEAD_SIZE
@@ -768,10 +782,11 @@ def train_one_seed(
         "static_categoricals": STATIC_CATEGORICALS,
     }
 
+    # Sichern der JSON Files für die Konfiguration und der Information über das genutze System 
     save_json(run_dir / "config.json", seed_config)
     save_json(run_dir / "system_info.json", get_system_info())
 
-    #training_ds, val_ds, test_ds = build_timeseries_datasets(df)
+    # Erstellen von Trainings- und Validierungs-Dataset
     training_ds, val_ds = build_timeseries_datasets(df)
     series_mapping = get_series_id_mapping(training_ds)
     num_series = len(series_mapping) if series_mapping is not None else int(df["series_id"].nunique())
@@ -791,18 +806,12 @@ def train_one_seed(
         persistent_workers=False,
         pin_memory=(TORCH_DEVICE == "cuda"),
     )
-    # test_loader = test_ds.to_dataloader(
-    #     train=False,
-    #     batch_size=batch_size,
-    #     num_workers=6,
-    #     persistent_workers=False,
-    #     pin_memory=(TORCH_DEVICE == "cuda"),
-    # )
 
     sample_batch = next(iter(train_loader))
     sample_x, _ = sample_batch
     input_dim = int(sample_x["encoder_cont"].shape[-1])
 
+    # Modellerstellung über PatchTST Klasse
     model = PatchTSTModel(
         input_dim=input_dim,
         horizon=PRED_LEN,
@@ -821,8 +830,10 @@ def train_one_seed(
         feature_names=feature_names,
     )
 
+    # Logger um die einzelnen Metriken pro Epoche zu loggen
     csv_logger = CSVLogger(save_dir=str(run_dir), name="lightning_logs")
 
+    # Checkpoint eines Modells abrufen. Bestes Modell zum derzeigen Stand speichern.
     ckpt = ModelCheckpoint(
         dirpath=str(run_dir),
         filename="best",
@@ -831,6 +842,7 @@ def train_one_seed(
         mode="min",
     )
 
+    # IMportierte Lighting Funktion zur Überwachung und Steuerung der Verbesserung während des Tranings aufrufen. 
     early = EarlyStopping(
         monitor="val_mase",
         patience=PATIENCE,
@@ -879,6 +891,7 @@ def train_one_seed(
             feature_names=feature_names,
         )
 
+    # Ermittelte Metriken speichern
     metrics_csv = Path(csv_logger.log_dir) / "metrics.csv"
     epoch_rows = []
     if metrics_csv.exists():
@@ -942,11 +955,6 @@ def train_one_seed(
             epoch_rows.append(row)
 
     prediction_output = collect_predictions(model, val_loader, series_mapping, model.device)
-
-    # test_output = collect_predictions(model, test_loader, series_mapping, model.device)
-    # test_pred_y = np.expm1(test_output["prediction_log"]).clip(min=0.0)
-    # test_true_y = np.expm1(test_output["true_log"]).clip(min=0.0)
-    # test_metrics = eval_mase_mse_wape_weekly_from_arrays(test_pred_y, test_true_y, test_output["series_ids"], mase_denoms)
 
     if not epoch_rows:
         epoch_rows = [{
@@ -1021,19 +1029,9 @@ def train_one_seed(
         "val_wape_w3": float(best_epoch_row["val_wape_w3"]) if pd.notna(best_epoch_row.get("val_wape_w3", np.nan)) else None,
         "val_wape_w4": float(best_epoch_row["val_wape_w4"]) if pd.notna(best_epoch_row.get("val_wape_w4", np.nan)) else None,
         "val_mse": float(best_epoch_row["val_mse"]) if pd.notna(best_epoch_row.get("val_mse", np.nan)) else None,
-        # "test_mase": float(test_metrics["mase"]),
-        # "test_mase_w1": float(test_metrics["mase_w1"]),
-        # "test_mase_w2": float(test_metrics["mase_w2"]),
-        # "test_mase_w3": float(test_metrics["mase_w3"]),
-        # "test_mase_w4": float(test_metrics["mase_w4"]),
-        # "test_wape": float(test_metrics["wape"]),
-        # "test_wape_w1": float(test_metrics["wape_w1"]),
-        # "test_wape_w2": float(test_metrics["wape_w2"]),
-        # "test_wape_w3": float(test_metrics["wape_w3"]),
-        # "test_wape_w4": float(test_metrics["wape_w4"]),
-        # "test_mse": float(test_metrics["mse"]),
     }
 
+    # Summary der Metriken speichern
     save_json(run_dir / "summary.json", summary)
     save_excel(run_dir, seed_config, epoch_rows, summary)
 
@@ -1079,7 +1077,7 @@ def objective_factory(df: pd.DataFrame, mase_denoms: dict, optuna_base_dir: Path
     return objective
 
 
-
+# Hauptfuntion des Skripts das alle Funktionen aufruft und den kompletten Traningsdurchlauf startet
 def main():
     df = load_preprocessed()
     df = add_time_series_features(df)
@@ -1091,11 +1089,16 @@ def main():
     all_features = known_reals + unknown_reals
 
     required_cols = ["series_id", "item_id", "store_id", "state_id", "time_idx", "split", "y_log"] + known_reals + unknown_reals
+   
+    # missing Cols nur für die Ausgabe falls im Datensatz Informationen fehlen
     missing_cols = [col for col in dict.fromkeys(required_cols) if col not in df.columns]
     if missing_cols:
         raise KeyError(f"Fehlende Spalten im DataFrame: {missing_cols}")
 
+    # Training Dataset aus dem gesamten Dataset erstellen (finales Subset), bei dem der Split mit train markiert ist
     train_df = df[df["split"] == "train"].copy()
+   
+    # MASE Nenner errechnen
     mase_denoms = compute_mase_denominators(train_df, seasonality=7)
 
     config = {
@@ -1134,6 +1137,7 @@ def main():
     save_json(parent_run_dir / "config.json", config)
     save_json(parent_run_dir / "system_info.json", get_system_info())
 
+    # Wenn Oputuna eingeschaltet ist, dann Optuna Study initialisieren, verschiedene Plots erstellen und Ergebnisse wegspeichern
     if USE_OPTUNA:
         optuna_run_dir = parent_run_dir / "optuna"
         optuna_run_dir.mkdir(parents=True, exist_ok=True)
@@ -1178,6 +1182,7 @@ def main():
         )
         all_seed_summaries.append(seed_summary)
 
+        # Den besten MASE Wert über alle Seeds bestimmen
         if np.isfinite(seed_summary["best_val_mase"]) and seed_summary["best_val_mase"] < best_overall_val_mase:
             best_overall_val_mase = float(seed_summary["best_val_mase"])
             best_overall_seed = int(current_seed)
@@ -1194,6 +1199,6 @@ def main():
 
     print("Saved:", parent_run_dir / "overall_summary.json")
 
-
+# Aufrufen der Hauptfunktion main() zum starten des Skriptes
 if __name__ == "__main__":
     main()
