@@ -1,5 +1,5 @@
-### Diese Textdatei enthält alle notwendigen Bibliotheken die für die Nutzung des Codes notwendig sind.
-### In dem train_all_models.ipynb File werden diese Bibliotheken importiert, um alle Bibliotheken herunterzuladen bevor die Tranings- und Test-Skripte aufgerufen werden.
+# Diese Textdatei enthält alle notwendigen Bibliotheken die für die Nutzung des Codes notwendig sind.
+# In dem train_all_models.ipynb File werden diese Bibliotheken importiert, um alle Bibliotheken herunterzuladen bevor die Tranings- und Test-Skripte aufgerufen werden.
 
 # Hilfsbibliotheken und Visualisierung
 numpy
