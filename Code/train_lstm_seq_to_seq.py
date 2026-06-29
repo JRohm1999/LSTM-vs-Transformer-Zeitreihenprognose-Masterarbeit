@@ -42,8 +42,8 @@ NUM_SEEDS = 1 # Seeds für das finale Traning. Wichtig: Wenn Optuna eingeschalte
 # Wird nur zur Dokumentation genutzt. Anzahl der Serien wird durch Subset bestimmt.
 MAX_SERIES = 1000
 
-# SEQ_LEN = Encoder-Länge (Vergangenheit die das Modell als Input bekommt)
-# HORIZON = Decoder-Länge (Zukunft, die das Modell vorhersagen soll)
+# SEQ_LEN = Encoder-Länge (Vergangenheit)
+# HORIZON = Decoder-Länge (Zukunft)
 SEQ_LEN = 56
 HORIZON = 28
 
@@ -85,9 +85,6 @@ MIN_DELTA = 0.001
 ITEM_EMB_DIM = 8
 STORE_EMB_DIM = 4
 STATE_EMB_DIM = 2
-
-# Modell-Architektur Konfiguration Ende
-# -----------------------------------------------------------------------------
 
 # -------------------------------------------------------------------------
 # Optuna Hyperparameter-Suche
@@ -220,12 +217,10 @@ def build_sliding_windows(df: pd.DataFrame, split_name: str, series_to_idx: dict
     if len(feature_values_enc_list) == 0:
         return None, None, None, None, None, None
 
-    # Die Listen werden in numpy-Arrays umgewandelt. feature_list und y_log_list werden zu 3D-Arrays (Anzahl_Samples, SEQ_LEN, Anzahl_Features) bzw. (Anzahl_Samples, HORIZON). series_list, item_list, store_list und state_list werden zu 1D-Arrays mit den entsprechenden Indizes.
-    # np.stack wird verwendet, um die Listen von Arrays entlang einer neuen Achse zu stapeln, wodurch ein 3D-Array entsteht. np.array wird verwendet, um die Listen von Indizes in 1D-Arrays umzuwandeln.
-    # n.stack = 0 bedeutet, dass die Arrays entlang der ersten Achse (der Sample-Achse) gestapelt werden. Dadurch entsteht ein Array der Form (Anzahl_Samples, SEQ_LEN, Anzahl_Features) für feature_list und (Anzahl_Samples, HORIZON) für y_log_list.
+    # Die Listen werden in numpy-Arrays umgewandelt um sie dann weiterzuverwenden
     return (
-        np.stack(feature_values_enc_list, 0),
-        np.stack(feature_values_dec_list, 0),  # Neu: Decoder Inputs
+        np.stack(feature_values_enc_list, 0), #n.stack = 0 bedeutet, dass die Arrays entlang der ersten Achse (der Sample-Achse) gestapelt werden
+        np.stack(feature_values_dec_list, 0), 
         np.stack(y_log_list, 0),
         np.array(series_list, dtype=np.int64),
         np.array(item_list, dtype=np.int64),
@@ -233,7 +228,7 @@ def build_sliding_windows(df: pd.DataFrame, split_name: str, series_to_idx: dict
         np.array(state_list, dtype=np.int64),
     )
 
-
+# Klasse für das Seq_to_Seq Modell
 class Seq_to_Seq_LSTM(nn.Module):
     # Sequenz to Sequenz (Encoder - Decoder) LSTM-Architektur für Multi-Horizon Forecasting.
     def __init__(self, enc_features_num: int, dec_features_num: int, hidden_size: int, horizon: int, num_items: int, num_stores: int, num_states: int, num_layers: int, dropout: float):
@@ -275,7 +270,6 @@ class Seq_to_Seq_LSTM(nn.Module):
     # Forward-Pass des Modells
     def forward(self, x_enc, x_dec, item_idx, store_idx, state_idx):
         # Die einzelnen Embedding-Vektoren für Item, Store und State werden mit dem jeweiligen Index aus den Eingabedaten abgerufen. Diese Vektoren repräsentieren die Informationen über die statischen Merkmale der Serie.
-        # Zum Beispiel Item_idx == 1. Holt aus der Matrix die bei der Erstellung der Embedding-Layer mit num_items definiert wurde, die Zeile mit Index 1, welche den Embedding-Vektor für dieses Item enthält. Das gleiche gilt für Store_idx und State_idx.
         item_vec = self.item_emb(item_idx)
         store_vec = self.store_emb(store_idx)
         state_vec = self.state_emb(state_idx)
@@ -283,28 +277,28 @@ class Seq_to_Seq_LSTM(nn.Module):
         # Die abgerufenen Embedding-Vektoren werden entlang der letzten Dimension (embedding_dim) zu einem einzigen Vektor pro Sample zusammengeführt. Dieser Vektor enthält die Informationen über Item, Store und State der Serie.
         static_vec = torch.cat([item_vec, store_vec, state_vec], dim=-1)
         
-        # 2. Encoder Vorbereitung
+        # Encoder Vorbereitung
         # Statische Infos an Encoder-Sequence anhängen
         static_enc = static_vec.unsqueeze(1).expand(-1, x_enc.size(1), -1)
-        # Der statische Vektor wird nun so angepasst, dass er die gleiche Sequenzlänge (Tage) wie die Eingabesequenz x hat.
+        # Der statische Vektor wird so angepasst, dass er die gleiche Sequenzlänge wie die Eingabesequenz x hat.
         enc_in = torch.cat([x_enc, static_enc], dim=-1)
         
-        # 3. Encoder Pass
+        # Encoder Pass
         # hidden_state (Kurzzeitspeicher), memory_cell_state (Langzeitspeicher) aus dem LSTM Encoder extrahieren.
         # _, enthält (batch, seq_len, hidden_size), dies wird aber nicht benötigt.
         _, (hidden_state, memory_cell_state) = self.encoder(enc_in)
 
-        # 4. Decoder Vorbereitung (Variante A)
+        # Decoder Vorbereitung
         # Statische Infos an Decoder-Sequence anhängen
         static_dec = static_vec.unsqueeze(1).expand(-1, x_dec.size(1), -1)
         # Der statische Vektor wird nun so angepasst, dass er die gleiche Sequenzlänge (Tage) wie die Eingabesequenz x hat.
         dec_in = torch.cat([x_dec, static_dec], dim=-1)
 
-        # 5. Decoder Pass
+        # Decoder Pass
         # Initialisiere Decoder mit Encoder-State (hidden_state, memory_cell_state)
         dec_out, _ = self.decoder(dec_in, (hidden_state, memory_cell_state))
 
-        # 6. Vorhersage durch lineares Layer
+        # Vorhersage durch lineares Layer
         out_final = self.fc(dec_out).squeeze(-1)
         
         return out_final
@@ -317,34 +311,31 @@ def eval_loss_logspace(model: nn.Module, loader: DataLoader) -> float:
     # Funktion zur Ermittlung des MSE-Losses im log-space, da das Modell im log-space trainiert wird. 
     loss_function = nn.MSELoss()
 
-    # torch.no_grad() wird genutzt, um die Berechnung der Vorhersagen und des Losses durchzuführen, ohne dass dabei Gradienten berechnet oder gespeichert werden. Dies spart Speicher und Rechenzeit, da wir uns im Evaluierungsmodus befinden und keine Backpropagation durchführen müssen.
-    # non_blocking ist notwendig um den Vorteil von pin_memory=True auszuspielen
+    # torch.no_grad() schließt die Gradientenberechnung aus. Das soll Rechenzeit sparen
     with torch.no_grad():
         for feature_values_enc, feature_values_dec, y_log_actual, _series_id, item_idx, store_idx, state_idx in loader:
-            feature_values_enc = feature_values_enc.to(DEVICE, non_blocking=True)
+            feature_values_enc = feature_values_enc.to(DEVICE, non_blocking=True) # non_blocking=True bedeutet schnellere Datenübertragung von CPU auf GPU, geht nur mit Cuda. 
             feature_values_dec = feature_values_dec.to(DEVICE, non_blocking=True)
             y_log_actual = y_log_actual.to(DEVICE, non_blocking=True)
             item_idx = item_idx.to(DEVICE, non_blocking=True)
             store_idx = store_idx.to(DEVICE, non_blocking=True)
             state_idx = state_idx.to(DEVICE, non_blocking=True)
 
-            # Auf Basis der Eingabeinformationen errechnet das Modell die Vorhersagen im log-space. Diese Vorhersagen werden dann mit den tatsächlichen Zielwerten (y_log_actual) verglichen, um den MSE-Loss zu berechnen. Die berechneten Losses werden in einer Liste gesammelt, um am Ende den Durchschnitts-Loss über alle Batches zu ermitteln.
+            # Auf Basis der Eingabeinformationen errechnet das Modell die Vorhersagen im log-space.
+            # Wird zusammen mit y_log_actual in der losses liste gepeichert
             pred_y_log = model(feature_values_enc, feature_values_dec, item_idx, store_idx, state_idx)
             losses.append(loss_function(pred_y_log, y_log_actual).item())
 
+    # Gebe den Durchschnitt der Fehler aus 
     return float(np.mean(losses)) if losses else float("nan")
 
+# Funktion zur Berechnung von MASE und MSE im Originalraum
 def eval_mase_mse(model: nn.Module, loader: DataLoader, idx_to_series: dict, mase_denoms: dict):
-    # Berechnung von MASE und MSE im Originalraum.
-    #
-    # Vorgehen:
-    #   - Vorhersagen liegen im log-space vor -> Rücktransformation via expm1.
-    #   - MSE wird im Originalraum berechnet (Sales-Einheiten).
-    #   - MASE wird pro Sample normalisiert anhand des Denominators der jeweiligen Serie.
+
     model.eval()
     all_mase, all_mse = [], []
 
-    # torch.no_grad() wird genutzt, um die Berechnung der Vorhersagen und des Losses durchzuführen, ohne dass dabei Gradienten berechnet oder gespeichert werden. Dies spart Speicher und Rechenzeit, da wir uns im Evaluierungsmodus befinden und keine Backpropagation durchführen müssen.
+    # torch.no_grad() schließt die Gradientenberechnung aus. Das soll Rechenzeit sparen
     with torch.no_grad():
         for feature_values_enc, feature_values_dec, y_log_actual, series_id_idx, item_idx, store_idx, state_idx in loader:
             feature_values_enc = feature_values_enc.to(DEVICE)
@@ -354,44 +345,42 @@ def eval_mase_mse(model: nn.Module, loader: DataLoader, idx_to_series: dict, mas
             store_idx = store_idx.to(DEVICE)
             state_idx = state_idx.to(DEVICE)
 
-            # Auf Basis der Eingabeinformationen errechnet das Modell die Vorhersagen im log-space. Diese Vorhersagen werden dann mit den tatsächlichen Zielwerten (y_log_actual) verglichen, um den MSE-Loss zu berechnen. Die berechneten Losses werden in einer Liste gesammelt, um am Ende den Durchschnitts-Loss über alle Batches zu ermitteln.
+            # Auf Basis der Eingabeinformationen errechnet das Modell die Vorhersagen im log-space.
             pred_log = model(feature_values_enc, feature_values_dec, item_idx, store_idx, state_idx)
         
-            # Vorhersage und IST Werte werden mittels expm1 zurück in den Originalraum transformiert. clamp_min(0.0) stellt sicher, dass negative Vorhersagen (die im Originalraum keinen Sinn ergeben würden) auf 0 gesetzt werden.
+            # Rücktransformation in Originalraum mit Clipping auf 0. Werte können nicht kleiner 0 sein
             pred_y = torch.expm1(pred_log).clamp_min(0.0)
             true_y = torch.expm1(y_log_actual).clamp_min(0.0)
 
-            # Anwenden der Formel für MSE im Originalraum: mean((y - y_hat)^2) und Hinzufügen zum all_mse Liste.
+            #MSE berechnen
             all_mse.append(torch.mean((pred_y - true_y) ** 2).item())
 
             # Berechnung des MASE
             mae_native = []
-            # Für die Berechnung der MASE wird für jedes Sample der entsprechende Denominator aus mase_denoms anhand der Serien-ID ermittelt. Dieser Denominator repräsentiert den durchschnittlichen Fehler eines Naive-Forecasters für die jeweilige Serie und dient als Normalisierungsfaktor für den absoluten Fehler (MAE) des Modells. Wenn für eine Serie kein Denominator gefunden wird, wird standardmäßig 1.0 verwendet, um Division durch Null zu vermeiden.
+            # Für die Berechnung der MASE wird für jedes Sample der entsprechende Denominator aus mase_denoms anhand der Serien-ID ermittelt
             for i in series_id_idx.cpu().numpy().tolist():
                 # Ermittlen der Series_id anhand des Indexes aus dem Dictory idx_to_series.
                 series_id = idx_to_series[i]
-                # Ermiteln des MAE Loss Value für die Serie aus mase_denoms. Wenn kein Denominator gefunden wird, wird 1.0 verwendet.
+                # Ermiteln des MAE Loss Value für die Serie aus mase_denoms. Wird kein Denominator gefunden nutze 1.
                 mae_native.append(mase_denoms.get(series_id, 1.0))
-            # Die Liste der Denominator-Werte wird in einen Tensor umgewandelt, damit sie für die Berechnung des MASE mit den Vorhersagen und den tatsächlichen Werten kompatibel ist. Der Tensor wird auf das gleiche Gerät wie pred_y verschoben, um sicherzustellen, dass die Berechnung auf der GPU (falls verfügbar) durchgeführt wird. Das unsqueeze(1) fügt eine zusätzliche Dimension hinzu, damit die Form des Denominator-Tensors mit der Form der MAE-Berechnung übereinstimmt.
+           
+            # Liste in Tensor umwandeln und auf GPU verschieben
             mae_native = torch.tensor(mae_native, dtype=torch.float32, device=pred_y.device).unsqueeze(1)
 
-            # MAE mittles Formel berechnen
+            # MAE berechnen
             mae = torch.mean(torch.abs(pred_y - true_y), dim=1, keepdim=True)
-            # MASE berechnen, indem der MAE durch den MAE der nativen Vorhersage geteilt wird. Das mean() am Ende berechnet den Durchschnitts-MASE über alle Samples im Batch, und item() extrahiert den Wert als Python-Float.
+
+            # MASE berechnen und Durchschnitt bilden
             mase = (mae / mae_native).mean().item()
 
             all_mase.append(mase)
 
+    # MASE und MSE als Durchschnitt über alle Serien wiedergeben
     return float(np.mean(all_mase)), float(np.mean(all_mse))
 
+# Funktion zur Berechnung von MASE und MSE und WAPE pro Woche
 def eval_mase_mse_wape_weekly(model: nn.Module, loader: DataLoader, idx_to_series: dict, mase_denoms: dict):
-    # Berechnung von MASE, MSE und WAPE im Originalraum, zusätzlich aufgeteilt in Wochen (7-Tage Blöcke).
-    #
-    # Definition WAPE:
-    #   WAPE = sum(|y - y_hat|) / sum(y)
-    #
-    # Wochen-Logik (HORIZON=28):
-    #   Woche 1 = Tage 1-7, Woche 2 = Tage 8-14, Woche 3 = Tage 15-21, Woche 4 = Tage 22-28
+
     model.eval()
 
     week_slices = [(0, 7), (7, 14), (14, 21), (21, 28)]
@@ -405,6 +394,7 @@ def eval_mase_mse_wape_weekly(model: nn.Module, loader: DataLoader, idx_to_serie
     wape_num_weeks = [0.0, 0.0, 0.0, 0.0]
     wape_den_weeks = [0.0, 0.0, 0.0, 0.0]
 
+    # Wie immer bei Evaulation: torch.no_grad() schließt die Gradientenberechnung aus. Das soll Rechenzeit sparen
     with torch.no_grad():
         for feature_values_enc, feature_values_dec, y_log_actual, series_id_idx, item_idx, store_idx, state_idx in loader:
             feature_values_enc = feature_values_enc.to(DEVICE)
@@ -414,54 +404,60 @@ def eval_mase_mse_wape_weekly(model: nn.Module, loader: DataLoader, idx_to_serie
             store_idx = store_idx.to(DEVICE)
             state_idx = state_idx.to(DEVICE)
 
+            #Vorhersage erstellen
             pred_log = model(feature_values_enc, feature_values_dec, item_idx, store_idx, state_idx)
 
-            # Rücktransformation in den Originalraum (Sales)
+            # Rücktransformation in den Originalraum 
             pred_y = torch.expm1(pred_log).clamp_min(0.0)
             true_y = torch.expm1(y_log_actual).clamp_min(0.0)
 
+            # Absulter Fehler
             abs_err = torch.abs(pred_y - true_y)
 
-            # MSE (gesamt)
+            # MSE
             all_mse.append(torch.mean((pred_y - true_y) ** 2).item())
 
-            # Denominators je Sample (MASE)
+            # Nenner von MASE erzeugen
             den_values = []
             for i in series_id_idx.cpu().numpy().tolist():
                 series_id = idx_to_series[i]
                 den_values.append(mase_denoms.get(series_id, 1.0))
             den = torch.tensor(den_values, dtype=torch.float32, device=pred_y.device).unsqueeze(1)
 
-            # MASE (gesamt)
+            # MASE 
             mae_overall = torch.mean(abs_err, dim=1, keepdim=True)
             all_mase_overall.append((mae_overall / den).mean().item())
 
-            # MASE je Woche
+            # MASE je Woche vorbereiten
             for w, (a, b) in enumerate(week_slices):
                 mae_week = torch.mean(abs_err[:, a:b], dim=1, keepdim=True)
                 all_mase_weeks[w].append((mae_week / den).mean().item())
 
-            # WAPE (gesamt)
+            # WAPE gesamt vorbereiten
             wape_num_overall += float(abs_err.sum().item())
             wape_den_overall += float(true_y.sum().item())
 
-            # WAPE je Woche
+            # WAPE je Woche vorbereiten
             for w, (a, b) in enumerate(week_slices):
                 wape_num_weeks[w] += float(abs_err[:, a:b].sum().item())
                 wape_den_weeks[w] += float(true_y[:, a:b].sum().item())
 
+    # Mitteln der Werte. Wenn leer dann Nan ausgeben
     mase = float(np.mean(all_mase_overall)) if all_mase_overall else float("nan")
     mse = float(np.mean(all_mse)) if all_mse else float("nan")
 
+    # MASE Wochenberechnung
     mase_week_values = []
     for w in range(4):
         mase_week_values.append(float(np.mean(all_mase_weeks[w])) if all_mase_weeks[w] else float("nan"))
 
+    # WAPE Wochenberechnung
     wape = (wape_num_overall / wape_den_overall) if wape_den_overall > 0 else float("nan")
     wape_week_values = []
     for w in range(4):
         wape_week_values.append((wape_num_weeks[w] / wape_den_weeks[w]) if wape_den_weeks[w] > 0 else float("nan"))
 
+    # Alle Metriken ausgeben
     return {
         "mase": mase,
         "mase_w1": mase_week_values[0],
@@ -476,22 +472,20 @@ def eval_mase_mse_wape_weekly(model: nn.Module, loader: DataLoader, idx_to_serie
         "wape_w4": float(wape_week_values[3]),
     }
 
-
+# Erzeugung eines Run-Verzeichnisses mit den wichtigsten Einstellungen im Namen.
 def ensure_run_dir() -> Path:
-    # Erzeugung eines Run-Verzeichnisses mit den wichtigsten Einstellungen im Namen.
     ts = time.strftime("%Y%m%d-%H%M%S")
     name = (f"{ts}_Seq_to_Seq_seed={SEED}__max_series={MAX_SERIES}")
     run_dir = RUNS_DIR / name
     run_dir.mkdir(parents=True, exist_ok=True)
     return run_dir
 
-
+# Funktion zum Speichern der JSON Files
 def save_json(path: Path, obj: dict) -> None:
     path.write_text(json.dumps(obj, indent=2), encoding="utf-8")
 
-
+# Funktion die die Systeminformationen Dokumentiert
 def get_system_info() -> dict:
-    # Sammlung einfacher Systeminformationen für die Dokumentation der Experimente.
     return {
         "device": DEVICE,
         "torch_version": torch.__version__,
@@ -499,7 +493,7 @@ def get_system_info() -> dict:
         "cuda_device_name": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
     }
 
-
+# Erstelle eine Liste mit Seeds je nach Anzahl der Seeds
 def build_seed_list() -> list:
     # Wenn NUM_SEEDS = 1, wird einfach der Wert aus SEED genutzt.
     # Wenn NUM_SEEDS > 1, werden fortlaufende Seeds genutzt (SEED, SEED+1, ...).
@@ -507,7 +501,7 @@ def build_seed_list() -> list:
         return [SEED]
     return [SEED + i for i in range(NUM_SEEDS)]
 
-
+# Hilfsfunktion erzeugt eine Liste von Seeds für einen Optuna-Trial
 def build_trial_seed_list(trial_base_seed: int, trial_seed_count: int) -> list:
     if trial_seed_count <= 1:
         return [trial_base_seed]
@@ -524,7 +518,9 @@ def suggest_hyperparameters(optuna_trial: optuna.Trial) -> dict:
     }
     return suggested_hyperparameters
 
-# optuna Funktion 
+# objective_factory() ist eine Funktion die eine andere Funktion zurückgibt. Das ist nötig,
+# weil Optuna intern nur def objective(trial) akzeptiert, die objective-Funktion aber
+# zusätzlich weitere Informationen benötigt — diese werden hier einmalig mitgegeben.
 def objective_factory(
     df: pd.DataFrame,
     feature_cols_enc: list,
@@ -538,14 +534,16 @@ def objective_factory(
     optuna_base_dir: Path,
 ):
     def objective(optuna_trial: optuna.Trial) -> float:
+        # Hyperparameter für diesen Trial sampeln
         suggested_hyperparameters = suggest_hyperparameters(optuna_trial)
-
+        # Separates Verzeichnis für jeden Trial anlegen
         trial_run_dir = optuna_base_dir / f"optuna_trial_{optuna_trial.number:04d}"
         trial_run_dir.mkdir(parents=True, exist_ok=True)
 
         trial_seed_list = build_trial_seed_list(SEED, OPTUNA_SEEDS_PER_TRIAL)
-
         validation_mase_values = []
+
+        # Jeden Seed des Trials trainieren und val_mase sammeln
         for seed_value in trial_seed_list:
             seed_run_dir = trial_run_dir / f"seed_{seed_value}"
             seed_run_dir.mkdir(parents=True, exist_ok=True)
@@ -566,8 +564,9 @@ def objective_factory(
             )
             validation_mase_values.append(float(seed_summary["best_val_mase"]))
 
+        # Mittleren MASE über alle Seeds als Trial-Ergebnis zurückgeben
         mean_validation_mase = float(np.mean(validation_mase_values)) if validation_mase_values else float("inf")
-
+        # Trial-Metadaten für spätere Analyse speichern
         optuna_trial.set_user_attr("trial_seeds", trial_seed_list)
         optuna_trial.set_user_attr("val_mases", validation_mase_values)
 
@@ -575,26 +574,22 @@ def objective_factory(
 
     return objective
 
-
+# Funktion um die Metrikausgabe für die CSV zu sortieren
 def reorder_metrics_columns(metrics_dataframe: pd.DataFrame) -> pd.DataFrame:
-    # Spaltenreihenfolge: Wochen-Metriken direkt neben val_mase / val_wape.
     column_order = [
         "epoch",
         "train_loss",
         "val_loss",
-
         "val_mase",
         "val_mase_w1",
         "val_mase_w2",
         "val_mase_w3",
         "val_mase_w4",
-
         "val_wape",
         "val_wape_w1",
         "val_wape_w2",
         "val_wape_w3",
         "val_wape_w4",
-
         "val_mse",
         "lr",
         "epoch_time_sec",
@@ -602,11 +597,13 @@ def reorder_metrics_columns(metrics_dataframe: pd.DataFrame) -> pd.DataFrame:
 
     existing_columns = [c for c in column_order if c in metrics_dataframe.columns]
     remaining_columns = [c for c in metrics_dataframe.columns if c not in existing_columns]
+    # Alle Spalten ausgeben
     return metrics_dataframe[existing_columns + remaining_columns]
 
-
+# Funktion zum zählen der tranierbaren Parameter. Wurde für die Auswahl der Modellgröße in der Arbeit genutzt.
 def count_parameters(model: nn.Module) -> dict:
     total = sum(p.numel() for p in model.parameters())
+    # tranierbare Parameter ermittlen
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     
     # Aufschlüsselung nach Layer-Gruppen
@@ -623,7 +620,7 @@ def count_parameters(model: nn.Module) -> dict:
     }
 
 
-
+# Funktion die einen kompletten Traningsdurchlauf für einen Seed enthält. 
 def train_one_seed(
     df: pd.DataFrame,
     feature_cols_enc: list,
@@ -640,17 +637,17 @@ def train_one_seed(
 
     global LAYER, DROPOUT
     
+    # Seed festlegen
     set_seed(seed_value)
 
-     # -------------------------------------------------------------
     # Hyperparameter durch die von Optuna ermittelten überschreiben (wenn Optuna aktiv ist)
-    # -------------------------------------------------------------
     learning_rate = LR
     hidden_size = HIDDEN_SIZE
     num_layers = LAYER
     dropout_rate = DROPOUT
     batch_size = BATCH_SIZE
 
+    # Optuna-Hyperparameter überschreiben die globalen Standardwerte falls Optuna läuft
     if hpo_params is not None:
         learning_rate = float(hpo_params.get("learning_rate", learning_rate))
         hidden_size = int(hpo_params.get("hidden_size", hidden_size))
@@ -661,7 +658,7 @@ def train_one_seed(
     feature_values_enc_train, feature_values_dec_train, Y_log_train, Series_train, Item_train, Store_train, State_train = build_sliding_windows(df, "train", series_to_idx, feature_cols_enc, feature_cols_dec)
     feature_values_enc_val, feature_values_dec_val, Y_log_val, Series_val, Item_val, Store_val, State_val = build_sliding_windows(df, "val", series_to_idx, feature_cols_enc, feature_cols_dec)
 
-    # Aufbau von je einem TensorDataset für Training und Validierung.
+    # Aufbau von TensorDatasets für Training und Validierung.
     train_ds = TensorDataset(
         torch.tensor(feature_values_enc_train, dtype=torch.float32),
         torch.tensor(feature_values_dec_train, dtype=torch.float32),
@@ -681,12 +678,11 @@ def train_one_seed(
         torch.tensor(State_val, dtype=torch.long),
     )
 
-    # Aufbau von DataLoadern für Training und Validierung. Der Trainings-DataLoader wird mit shuffle=True erstellt, um die Reihenfolge der Samples in jedem Epochendurchlauf zu randomisieren, was zu einem robusteren Training führen soll.
+    # Aufbau von DataLoadern für Training und Validierung.
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=6, persistent_workers=False)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=6, persistent_workers=False)
 
-    # Modellinitialisierung.
-    # Modell Init
+    # Modellinitialisierung
     model = Seq_to_Seq_LSTM(
         enc_features_num=len(feature_cols_enc),
         dec_features_num=len(feature_cols_dec),
@@ -705,12 +701,11 @@ def train_one_seed(
     print(f"Gesamt Parameter:       {param_info['total']:,}")
     print(f"Aufschlüsselung:        {param_info['breakdown']}")
 
-    # Optimizer, Loss-Funktion und Scheduler Setup.
+    # Optimizer, Loss-Funktion und LR-Scheduler
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     loss_function = nn.MSELoss()
 
-     # ReduceLROnPlateau Scheduler
-    # Steuerung der LearningRate anhand val_mase. 
+    # Steuerung der LearningRate anhand val_mase per Scheduler 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode="min",
@@ -719,19 +714,22 @@ def train_one_seed(
         min_lr=LR_MIN,
     )
 
-    # Protokollierung pro Epoche.
+    # Liste für Protokollierung pro Epoche
     epoch_rows = []
 
-    # Early Stopping State.
+    # Early Stopping 
     best_val_mase = float("inf")
     best_epoch = -1
     no_improve = 0
     best_model_path = run_dir / "best_model.pt"
 
+    # Startzeit ermittlen
     total_start = time.perf_counter()
 
+    # Traning starten mit maximal den MAX_EPOCHS
     for epoch in range(1, MAX_EPOCHS + 1):
-        t0 = time.perf_counter()
+        # Startzeit der Epoche sichern
+        time_start_epoch = time.perf_counter()
 
         # Training (MSE im log-space).
         model.train()
@@ -746,11 +744,15 @@ def train_one_seed(
             state_idx = state_idx.to(DEVICE)
 
             optimizer.zero_grad(set_to_none=True)
+            # Vorhersage
             pred_y_log = model(feature_values_enc, feature_values_dec, item_idx, store_idx, state_idx)
+            # Loss ermittlen
             loss = loss_function(pred_y_log, y_log_actual)
+            # Backpropagation
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            # Traningsloss speichern
             train_losses.append(loss.item())
 
         train_loss = float(np.mean(train_losses)) if train_losses else float("nan")
@@ -760,27 +762,25 @@ def train_one_seed(
         val_metrics = eval_mase_mse_wape_weekly(model, val_loader, idx_to_series, mase_denoms)
 
         val_mse = val_metrics["mse"]
-
         val_mase = val_metrics["mase"]
         val_mase_w1 = val_metrics["mase_w1"]
         val_mase_w2 = val_metrics["mase_w2"]
         val_mase_w3 = val_metrics["mase_w3"]
         val_mase_w4 = val_metrics["mase_w4"]
-
         val_wape = val_metrics["wape"]
         val_wape_w1 = val_metrics["wape_w1"]
         val_wape_w2 = val_metrics["wape_w2"]
         val_wape_w3 = val_metrics["wape_w3"]
         val_wape_w4 = val_metrics["wape_w4"]
 
-        # Scheduler step basierend auf val_mase.
+        # Scheduler step basierend auf val_mase ausführen
         if np.isfinite(val_mase):
             scheduler.step(val_mase)
 
-        # Messung der Epochezeit.
-        epoch_time = time.perf_counter() - t0
+        # Messung der Epochezeit
+        epoch_time = time.perf_counter() - time_start_epoch
 
-        # Early Stopping basiert auf val_mase.
+        # Early Stopping prüfen und wenn keine verbesserung hochzählen
         improved = (best_val_mase - val_mase) > MIN_DELTA
         if improved:
             best_val_mase = val_mase
@@ -790,7 +790,7 @@ def train_one_seed(
         else:
             no_improve += 1
 
-        # Konsolenausgabe für die Übersicht beim Training.
+        # Konsolenausgabe für die Übersicht beim Training
         print(
             f"Seed {seed_value} | "
             f"Epoch {epoch:02d} | "
@@ -801,7 +801,7 @@ def train_one_seed(
             f"time={epoch_time:.1f}s | no_improve={no_improve}"
         )
 
-        # Informationen über die Trainingsepoche speichern.
+        # Informationen über die Trainingsepoche speichern
         epoch_rows.append(
             {
                 "epoch": epoch,
@@ -823,16 +823,17 @@ def train_one_seed(
             }
         )
 
-        # Wenn die Anzhal der Epochen ohne Verbesserung die Patience überschreitet, wird das Training abgebrochen.
+        # Wenn die Anzahl der Epochen ohne Verbesserung die Patience überschreitet, wird das Training abgebrochen
         if no_improve >= PATIENCE:
             break
 
+    # Gesamtzeit über einen Seed sichern
     total_time = time.perf_counter() - total_start
 
+    # Speichern der Metriken und erstellen der Abbildung des Traningsverlaufes
     metrics_dataframe = pd.DataFrame(epoch_rows)
     metrics_dataframe = reorder_metrics_columns(metrics_dataframe)
     metrics_dataframe.to_csv(run_dir / "metrics.csv", index=False)
-
     save_plots(run_dir, epoch_rows)
 
     # Speichern der wichtigsten Metriken pro Seed.
@@ -852,23 +853,22 @@ def train_one_seed(
 
     return summary
 
-
+# Hauptfunktion des Skiptes
 def main():
-    # Dataframe Laden.
+    # Dataframe Laden
     df = load_preprocessed()
 
-    # Ergänzung der autoregressiven Features auf konsistenter Skala (y_log-basiert).
+    # Am Afnag wurde noch mit yz gearbeitet. Dies wurde verworfen
     #df = add_autoregressive_features_from_yz(df)
 
-    # Zusammenstellung der finalen Feature-Liste.
+    # Zusammenstellung der Feature-Liste
     feature_cols_enc, feature_cols_dec = build_feature_columns()
 
     # Plausibilitätsprüfung: Features dürfen keine NaNs enthalten.
-    # NaNs würden im Training typischerweise zu instabilen Loss-Werten führen.
     if df[feature_cols_enc].isna().values.any():
         raise RuntimeError("NaN-Werte in enc Feature-Spalten gefunden. Bitte prüfen.")
 
-    # Mapping series_id -> fortlaufender Index.
+    # Mapping der _ids auf fortlaufenden Index.
     series_ids = sorted(df["series_id"].unique())
     series_to_idx = {series_id: i for i, series_id in enumerate(series_ids)}
     idx_to_series = {i: series_id for series_id, i in series_to_idx.items()}
@@ -885,9 +885,10 @@ def main():
     df["store_id_code"] = df["store_id"].map(store_to_idx).astype(np.int64)
     df["state_id_code"] = df["state_id"].map(state_to_idx).astype(np.int64)
 
-    # Run-Verzeichnis und Metadaten für Dokumentation.
+    # Run-Verzeichnis prüfen und erstellen
     run_dir = ensure_run_dir()
 
+    # Zusammenfassung der Ergebnisse
     summary = {
         "seed": SEED,
         "num_seeds": int(NUM_SEEDS),
@@ -907,16 +908,15 @@ def main():
         "n_series_total": int(df["series_id"].nunique()),
         "split_counts": df["split"].value_counts().to_dict(),
     }
+    # Speichern als JSON
     save_json(run_dir / "run_config.json", summary)
     save_json(run_dir / "system_info.json", get_system_info())
 
-    # MASE-Denominators werden ausschließlich auf Trainingsdaten berechnet.
+    # Train DF holen und MAE der Naivprognose berechnen.
     train_df = df[df["split"] == "train"].copy()
     mase_denoms = compute_mase_denominators(train_df, seasonality=7)
 
-    # -----------------------------------------------------------------
-    # Optuna: Hyperparameter Suche
-    # -----------------------------------------------------------------
+    # Wenn Optuna eingeschaltet ist, dann starte die Suche
     if USE_OPTUNA:
         optuna_run_dir = run_dir / "optuna"
         optuna_run_dir.mkdir(parents=True, exist_ok=True)
@@ -935,32 +935,28 @@ def main():
         )
 
         optuna_study = optuna.create_study(direction=OPTUNA_DIRECTION)
-        # Optuna startet mit 0 statt 1, daher wird um eins hochgezählt
         optuna_study.optimize(objective_function, timeout=OPTUNA_TIMEOUT_SEC)
 
-        # 1. Verlauf der Objective-Funktion
+        # Erstellen einiger Übersichten für die Traningsentwicklung
         fig1 = plot_optimization_history(optuna_study)
         fig1.write_html(optuna_run_dir / "optuna_optimization_history.html")
-
-        # 2. Parameter-Wichtigkeit 
         fig2 = plot_param_importances(optuna_study)
         fig2.write_html(optuna_run_dir / "optuna_param_importances.html")
-
-        # 3. Parallel-Koordinaten 
         fig3 = plot_parallel_coordinate(optuna_study)
         fig3.write_html(optuna_run_dir / "optuna_parallel_coordinate.html")
-
-        # 4. Slice Plot
         fig4 = plot_slice(optuna_study)
         fig4.write_html(optuna_run_dir / "optuna_slice.html")
 
+        # Speichern der besten Konfiguration und Ergebnisse
         best_hyperparameters = optuna_study.best_params
-        # save_json(run_dir / "optuna_best_params.json", best_hyperparameters)
-        # save_json(run_dir / "optuna_best_value.json", {"best_value": float(optuna_study.best_value)})
+        save_json(run_dir / "optuna_best_params.json", best_hyperparameters)
+        save_json(run_dir / "optuna_best_value.json", {"best_value": float(optuna_study.best_value)})
 
         print("Optuna bester Wert (mean val_mase):", optuna_study.best_value)
         print("Optuna beste Parameter:", best_hyperparameters)
 
+        # Bei der Nutzung mehrerer Seeds werden diese noch zuammengefasst und das beste Ergebnis ermittelt
+        # In dieser Arbeit wurde aber durch den erhöhten Rechenaufwand nur ein Seed für Optuna genutzt
         seed_list = build_seed_list()
 
         all_seed_summaries = []
@@ -1006,11 +1002,12 @@ def main():
         if best_overall_model_path is not None and best_overall_model_path.exists():
             best_target_path = run_dir / f"best_model_overall_bestparams_seed{best_overall_seed}.pt"
             best_target_path.write_bytes(best_overall_model_path.read_bytes())
-            print("Saved best overall model:", best_target_path)
+            print("Bestes Modell gespeichert unter:", best_target_path)
 
-        print("Saved:", run_dir / "overall_summary_bestparams.json")
+        print("Gespeichert unter:", run_dir / "overall_summary_bestparams.json")
         return
 
+    # Hier das gleiche nur für normales Traning
     seed_list = build_seed_list()
 
     all_seed_summaries = []
@@ -1053,10 +1050,10 @@ def main():
     if best_overall_model_path is not None and best_overall_model_path.exists():
         best_target_path = run_dir / f"best_model_overall_seed{best_overall_seed}.pt"
         best_target_path.write_bytes(best_overall_model_path.read_bytes())
-        print("Saved best overall model:", best_target_path)
+        print("Bestes Modell gespeichert unter:", best_target_path)
 
-    print("Saved:", run_dir / "overall_summary.json")
+    print("Gespeichert unter:", run_dir / "overall_summary.json")
 
-
+# Aufruf der Main Funktion
 if __name__ == "__main__":
     main()
