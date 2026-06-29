@@ -1,4 +1,5 @@
 # Traningsskript für LSTM Sequenz-to-Sequenz-Modell
+# Die Skripte der LSTM Modelle sind bis auf den Encoder Decoder Unterschied grundsätzlich identisch
 
 # Importieren der notwendigen Bibliotheken
 import json     # Zur Ausgabe von Informationen
@@ -93,9 +94,9 @@ STATE_EMB_DIM = 2
 # Der Suchraum der Parameter wird in der Funktion 'suggest_hyperparameters' bestimmt.
 USE_OPTUNA = False  # Für die Suche der besten Hyperparameter True, für finale Runs mit festgelegten Parametern False
 OPTUNA_TRIALS = None # Anzahl an Trials (Durchläufen), None heißt kein Limit per Trials sondern hier per Timeout
-OPTUNA_TIMEOUT_SEC = 43200 # Maximale Laufzeit der Optuna-Suche in Sekunden (hier: 12 Stunden)
+OPTUNA_TIMEOUT_SEC = 43200 # Maximale Laufzeit der Optuna-Suche in Sekunden hier 12 Stunden
 OPTUNA_SEEDS_PER_TRIAL = 1 # Jede Parameterkombination wird mit defefinierter Anzahl zufällig im Lösungsraum gestartet, Analog zu NUM_SEEDS
-OPTUNA_DIRECTION = "minimize"  # Ziel: Lossvalue von val_mase minimieren
+OPTUNA_DIRECTION = "minimize"  # Lossvalue von val_mase minimieren
 
 
 # Funktion zum setzen der Zufallsseeds um Reproduzierbarkeit zu erhöhen bzw. zu testen.
@@ -303,9 +304,8 @@ class Seq_to_Seq_LSTM(nn.Module):
         
         return out_final
 
-
+# Berechnung des MSE-Loss im log-space für Validation.
 def eval_loss_logspace(model: nn.Module, loader: DataLoader) -> float:
-    # Berechnung des MSE-Loss im log-space für Validation.
     model.eval()
     losses = []
     # Funktion zur Ermittlung des MSE-Losses im log-space, da das Modell im log-space trainiert wird. 
@@ -345,7 +345,7 @@ def eval_mase_mse(model: nn.Module, loader: DataLoader, idx_to_series: dict, mas
             store_idx = store_idx.to(DEVICE)
             state_idx = state_idx.to(DEVICE)
 
-            # Auf Basis der Eingabeinformationen errechnet das Modell die Vorhersagen im log-space.
+            # Vorhersage des Modells erfolgt immer im Log-Raum
             pred_log = model(feature_values_enc, feature_values_dec, item_idx, store_idx, state_idx)
         
             # Rücktransformation in Originalraum mit Clipping auf 0. Werte können nicht kleiner 0 sein
@@ -507,9 +507,8 @@ def build_trial_seed_list(trial_base_seed: int, trial_seed_count: int) -> list:
         return [trial_base_seed]
     return [trial_base_seed + i for i in range(trial_seed_count)]
 
-
+# Funktion die die Suchraum von Optuna definiert
 def suggest_hyperparameters(optuna_trial: optuna.Trial) -> dict:
-    # Die Parameter Grenzen für Optuna festlegen, in denen nach der optimalen Kombination gesucht wird
     suggested_hyperparameters = {
         "learning_rate": optuna_trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True),
         "hidden_size": optuna_trial.suggest_categorical("hidden_size", [128,256]),
@@ -731,7 +730,7 @@ def train_one_seed(
         # Startzeit der Epoche sichern
         time_start_epoch = time.perf_counter()
 
-        # Training (MSE im log-space).
+        # Training (MSE im log-space)
         model.train()
         train_losses = []
 
@@ -757,7 +756,7 @@ def train_one_seed(
 
         train_loss = float(np.mean(train_losses)) if train_losses else float("nan")
 
-        # Validation (Loss im log-space, MASE/MSE/WAPE im Originalraum).
+        # Validation (Loss im log-space, MASE/MSE/WAPE im Originalraum)
         val_loss = eval_loss_logspace(model, val_loader)
         val_metrics = eval_mase_mse_wape_weekly(model, val_loader, idx_to_series, mase_denoms)
 
@@ -836,7 +835,7 @@ def train_one_seed(
     metrics_dataframe.to_csv(run_dir / "metrics.csv", index=False)
     save_plots(run_dir, epoch_rows)
 
-    # Speichern der wichtigsten Metriken pro Seed.
+    # Speichern der wichtigsten Metriken pro Seed
     summary = {
         "seed": int(seed_value),
         "best_val_mase": float(best_val_mase),
@@ -858,7 +857,7 @@ def main():
     # Dataframe Laden
     df = load_preprocessed()
 
-    # Am Afnag wurde noch mit yz gearbeitet. Dies wurde verworfen
+    # Am Anfaag wurde noch mit yz gearbeitet. Dies wurde verworfen - Die Funktion ist bereits entfernt
     #df = add_autoregressive_features_from_yz(df)
 
     # Zusammenstellung der Feature-Liste
