@@ -14,6 +14,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Setzt die Präzision für float32-Matrixberechnung auf medium um Performance zu steigern
+# Hintergrund ist einfach das Modelltraning zu beschleunigen
 torch.set_float32_matmul_precision("medium")
 
 import optuna
@@ -25,6 +27,7 @@ from optuna.visualization import (
 )
 
 import lightning.pytorch as pl
+# Callbacks steuern das Verhalten während des Trainings hier: Early Stopping, LR-Überwachung, Checkpoints
 from lightning.pytorch.callbacks import EarlyStopping, LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import CSVLogger
 
@@ -46,21 +49,21 @@ RUNS_DIR = Path("runs") / "patchtst"
 # -----------------------------------------------------------------------------
 # Trainingdetails
 # -----------------------------------------------------------------------------
-# Traning der Modelle auf der Grafiskkarte (GPU) wenn möglich. Wenn keine GPU vorhanden wird CPU genutzt
+# Traning der Modelle auf der Grafikkarte (GPU) wenn möglich. Wenn keine GPU vorhanden wird CPU genutzt
 DEVICE = "gpu" if torch.cuda.is_available() else "cpu"
 TORCH_DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-# Seeds: Anzahl an Traningsläufen mit der identischen Hyperparameterkonfiguration | BASE_SEED = Random Initialisierung | NUM_SEEDS = Anzahl an SEEDS (Trainingsläufen)
-BASE_SEED = 1
-NUM_SEEDS = 3
+# Seeds: Anzahl an Traningsläufen mit der identischen Hyperparameterkonfiguration
+BASE_SEED = 1 # Seed selbst
+NUM_SEEDS = 3 # Anzahl an Seeds für normalen Lauf
 MAX_SERIES = 1000
 
-# Encoder = 56 Tage Lookback, PRED_LEN = 28 Prognosezeitraum
+# Encoder = 56 Tage Historie, PRED_LEN = 28 Prognosezeitraum
 ENCODER_LEN = 56
 PRED_LEN = 28
 HORIZON = PRED_LEN
 
-# Anzahl der maximalen Traingsepochen pro Run (Seed). Wird ggf. durch PATIENCE (Early Stopping) vorher beendet.
+# Anzahl der maximalen Traingsepochen pro Run. Wird ggf. durch Early-Stopping vorher beendet
 MAX_EPOCHS = 50
 
 # -----------------------------------------------------------------------------
@@ -71,10 +74,10 @@ BATCH_SIZE = 1024
 LR = 0.0006559644071632867
 D_MODEL = 128   # Synonym für Hidden Size
 ATTN_HEAD_SIZE = 2
-HIDDEN_CONT_SIZE = int(D_MODEL/2)
+HIDDEN_CONT_SIZE = int(D_MODEL/2) # Hidden Continuous Size wird als halbe D_MODEL-Größe gesetzt. Entscheidung dafür ist die Modellgröße bewusst im Rahmen zu halten.  
 DROPOUT = 0.10827211824776498
 
-# Patch Len und Stride sind PatchTST spezifische Parameter, die für das Patching (Zusammenfassen), der Historie verantwortlich sind
+# Patch Len und Stride sind spezifische PatchTST Parameter, die für das Patching der Historie genutzt werden
 PATCH_LEN = 16
 PATCH_STRIDE = 8
 NUM_TRANSFORMER_LAYERS = 3
@@ -119,6 +122,7 @@ STATIC_CATEGORICALS = ["item_id", "store_id", "state_id"]
 
 # Funktion um Seed zu erzeugen 
 def set_seed(seed: int) -> None:
+    # Setzt Seed und stellt somit Reproduzierbarkeit der Trainingsläufe sicher
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
@@ -128,35 +132,38 @@ def set_seed(seed: int) -> None:
 
 # Funktion um die Preprocessed Daten aus der CSV (Subset) zu laden.
 def load_preprocessed() -> pd.DataFrame:
+    # Prüft ob die Datei existiert und wirft einen Fehler wenn nicht
     if not CSV_PATH.exists():
-        raise FileNotFoundError("Keine vorverarbeitete Datei gefunden (m5_long.csv).")
+        raise FileNotFoundError("Keine Datei gefunden (m5_long.csv).")
+    # Liest die CSV-Datei ein und wandelt die date Spalte direkt in ein Datumsformat um
     return pd.read_csv(CSV_PATH, parse_dates=["date"])
 
 
-# Hinzufügen der Zeitbasierten Features (Lag, Rolling)
-def add_time_series_features(df: pd.DataFrame) -> pd.DataFrame:
+# Hinzufügen der zeitlichen Features Lag und Rolling
+def add_time_series_features(df: pd.DataFrame):
     df = df.copy()
     df = df.sort_values(["series_id", "time_idx"]).reset_index(drop=True)
 
-    if "y_log" not in df.columns:
-        raise KeyError("Spalte 'y_log' fehlt. Preprocessing ist unvollständig.")
-
+    # Erstellen der Lag Features
     for lag in LAG_LIST:
         df[f"y_log_lag_{lag}"] = df.groupby("series_id")["y_log"].shift(lag)
 
     grouped_shifted = df.groupby("series_id")["y_log"].shift(1)
+
+    # Erstellen der Rolling Features 
     for window in ROLLING_WINDOWS:
         df[f"y_log_roll_mean_{window}"] = (
             grouped_shifted.rolling(window=window, min_periods=1)
-            .mean()
+            .mean() # Durchschnitt
             .reset_index(level=0, drop=True)
         )
         df[f"y_log_roll_std_{window}"] = (
             grouped_shifted.rolling(window=window, min_periods=1)
-            .std()
+            .std() #Standardabweichung
             .reset_index(level=0, drop=True)
         )
 
+    # Alle Features in einer Liste sammeln
     engineered_cols = [f"y_log_lag_{lag}" for lag in LAG_LIST]
     engineered_cols += [f"y_log_roll_mean_{window}" for window in ROLLING_WINDOWS]
     engineered_cols += [f"y_log_roll_std_{window}" for window in ROLLING_WINDOWS]
@@ -166,11 +173,12 @@ def add_time_series_features(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # Feature Spalten erstellen, Ausgabe der Known Features und der Unknown Features
-def build_feature_columns() -> tuple[list, list]:
+def build_feature_columns():
     unknown_reals = ["y_log"]
     unknown_reals += [f"y_log_lag_{lag}" for lag in LAG_LIST]
     unknown_reals += [f"y_log_roll_mean_{window}" for window in ROLLING_WINDOWS]
     unknown_reals += [f"y_log_roll_std_{window}" for window in ROLLING_WINDOWS]
+    # Gibt beide Listen zurück
     return KNOWN_REAL_FEATURES.copy(), unknown_reals
 
 
@@ -184,53 +192,66 @@ def compute_mase_denominators(train_df: pd.DataFrame, seasonality: int = 7) -> d
         else:
             y_values = np.expm1(group["y_log"].to_numpy(dtype=np.float32))
 
-         # Für sehr kurze Serien (länger als die Saisonalität) wird der Denominator auf 1 gesetzt, um Division durch Null zu vermeiden.
+         # Für sehr kurze Serien wird der Denominator auf 1 gesetzt, um Division durch Null zu vermeiden. Sollte in diesem Datensatz eigentlich nicht vorkommen.
+         # Dient nur als Sicherheitsnetz
         if len(y_values) <= seasonality:
             denominators[str(series_id)] = 1.0
             continue
         
-        # Abweichung von "heute" zu vor sieben Tagen (was der Naivprognose entspricht)
+        # Abweichung von heute zu vor sieben Tagen
         diffs = np.abs(y_values[seasonality:] - y_values[:-seasonality])
+       
+        # Mittelwert der absoluten Differenzen ergibt den MAE der Naivprognose
+        # Falls Mittelwert null sein sollte wird er auf 1 gesetzt, sonst später Division durch null
         denom = float(np.mean(diffs)) if np.mean(diffs) > 0 else 1.0
         denominators[str(series_id)] = denom
     return denominators
 
-
+# Holt Zuordnung von numerischem Index zu ursprünglicher Zeitreihen-ID aus dem Dataset
 def get_series_id_mapping(training_ds: TimeSeriesDataSet):
     mapping = None
+    # Greift auf den internen kategorischen Encoder des TimeSeriesDataSet zu
     if hasattr(training_ds, "categorical_encoders"):
         encoders = getattr(training_ds, "categorical_encoders", {})
         if isinstance(encoders, dict) and "series_id" in encoders:
             encoder = encoders["series_id"]
             classes = None
+            # Unterstützt verschiedene Attributnamen des sklearn-Encoders (classes_ oder classes)
             if hasattr(encoder, "classes_"):
                 classes = list(getattr(encoder, "classes_"))
             elif hasattr(encoder, "classes"):
                 classes = list(getattr(encoder, "classes"))
             if classes is not None:
+                # Erstellt ein Dictionary - numerischer Index zu oiginale Zeitreihen-ID als String
                 mapping = {int(i): str(v) for i, v in enumerate(classes)}
     return mapping
 
-
+# Extrahiert die Zeitreihen-IDs aus dem rohen Batch-Dictionary des DataLoaders
 def extract_series_ids_from_raw_x(raw_x, series_mapping) -> np.ndarray:
+    # Sucht nach dem Gruppenkey im Batch-Dictionary (pytorch_forecasting nutzt 'groups' oder 'group_ids')
     groups_key = None
     if isinstance(raw_x, dict):
+        # beides probieren 'groups' oder 'group_ids'
         if "groups" in raw_x:
             groups_key = "groups"
         elif "group_ids" in raw_x:
             groups_key = "group_ids"
 
+    # Falls nichts gefunden wird, wird Fehler ausgegeben
     if groups_key is None:
-        raise KeyError("Konnte keine Gruppeninformation (groups/group_ids) in raw.x finden.")
+        raise KeyError("Keine Gruppeninformation (groups/group_ids) in raw.x gefunden.")
 
     group_values = raw_x[groups_key]
+    # Konvertiert Tensor zu NumPy falls nötig
     if isinstance(group_values, torch.Tensor):
         group_values = group_values.detach().cpu().numpy()
 
     group_values = np.asarray(group_values)
+    # Falls das Array mehrdimensional ist (Batch × Gruppen) nur die erste Gruppe (series_id) verwenden
     if group_values.ndim == 2:
         group_values = group_values[:, 0]
 
+    # Mappt die numerischen Indizes auf die ursprünglichen Zeitreihen-ID-Strings für Metrikberechnungen
     series_ids = []
     for value in group_values.tolist():
         try:
@@ -256,20 +277,24 @@ def extract_point_forecast(prediction_array: np.ndarray) -> np.ndarray:
 
 
 # Berechne den Loss für MSE im Log Space (Traningsmetrik)
-def eval_loss_logspace_from_arrays(pred_y_log: np.ndarray, true_y_log: np.ndarray) -> float:
+def calc_mse_loss_logspace(pred_y_log: np.ndarray, true_y_log: np.ndarray):
     return float(np.mean((pred_y_log - true_y_log) ** 2))
 
 # Berechne die Bewertungsmetriken MASE, MSE, und WAPE gesamt als auch auf wöchentlicher Basis 
-#(wöchentliche Berechnung ist für die Evaluation nach dem Traning nicht unbedingt nötig, ist aber vollständigkeitshalber hier erhalten geblieben)
+# wöchentliche Berechnung ist für die Evaluation nach dem Traning nicht unbedingt nötig, ist aber vollständigkeitshalber hier erhalten geblieben
 def eval_mase_mse_wape_weekly_from_arrays(pred_y, true_y, series_ids, mase_denoms):
+    
+    # Die vier Wochen mit den Start und Endtagen
     week_slices = [(0, 7), (7, 14), (14, 21), (21, 28)]
 
     pred_y = np.asarray(pred_y, dtype=np.float32)
     true_y = np.asarray(true_y, dtype=np.float32)
 
+    # Negative Werte abschneiden: Absatzzahlen können nicht negativ sein
     pred_y = np.clip(pred_y, a_min=0.0, a_max=None)
     true_y = np.clip(true_y, a_min=0.0, a_max=None)
 
+    # Absoluter Fehler für alle Zeitpunkte und Zeitreihen gleichzeitig berechnen
     abs_err = np.abs(pred_y - true_y)
 
     # MSE
@@ -297,6 +322,7 @@ def eval_mase_mse_wape_weekly_from_arrays(pred_y, true_y, series_ids, mase_denom
     wape_den = float(np.sum(true_y))
     wape = (wape_num / wape_den) if wape_den > 0 else float("nan")
 
+    # Wape pro Woche
     wape_weeks = []
     for start, end in week_slices:
         num = float(np.sum(abs_err[:, start:end]))
@@ -319,16 +345,19 @@ def eval_mase_mse_wape_weekly_from_arrays(pred_y, true_y, series_ids, mase_denom
     }
 
 
-
+# Quantile Loss Funktion: berechnet den Loss für alle Quantile gleichzeitig
+# Transformermodelle geben Prognosen in Quantilen aus
 def quantile_loss(prediction: torch.Tensor, target: torch.Tensor, quantiles: list[float]) -> torch.Tensor:
     losses = []
     for quantile_index, quantile in enumerate(quantiles):
+        # Fehler = Zielwert - Prognose für das jeweilige Quantil
         errors = target - prediction[:, :, quantile_index]
         losses.append(torch.maximum((quantile - 1.0) * errors, quantile * errors).unsqueeze(-1))
+    # Alle Quantil-Losses stapeln und mittleren Loss berechnen
     stacked_losses = torch.cat(losses, dim=-1)
     return stacked_losses.mean()
 
-
+# Hilfsfunktion um einen kompletten Batch auf das "Traningsgerät", hier GPU, zu verschieben
 def move_batch_to_device(batch, device):
     if isinstance(batch, dict):
         return {key: move_batch_to_device(value, device) for key, value in batch.items()}
@@ -343,6 +372,8 @@ def move_batch_to_device(batch, device):
 class PatchTSTEncoderBlock(nn.Module):
     def __init__(self, d_model: int, attention_head_size: int, dropout: float, ff_d_model: int):
         super().__init__()
+
+        # Multi-Head Attention
         self.self_attention = nn.MultiheadAttention(
             embed_dim=d_model,
             num_heads=attention_head_size,
@@ -350,21 +381,25 @@ class PatchTSTEncoderBlock(nn.Module):
             batch_first=True,
         )
         self.dropout = nn.Dropout(dropout)
+        # LayerNorm nach Attention-Layer
         self.norm_1 = nn.LayerNorm(d_model)
+        # Feed-Forward Netzwerk: Projektion auf ff_d_model → GELU → zurück auf d_model
         self.ffn = nn.Sequential(
             nn.Linear(d_model, ff_d_model),
             nn.GELU(),
             nn.Dropout(dropout),
             nn.Linear(ff_d_model, d_model),
         )
+        # LayerNorm nach FFN (zweite Residual-Verbindung)
         self.norm_2 = nn.LayerNorm(d_model)
 
     def forward(self, hidden_states: torch.Tensor):
+        # Self-Attention mit Residual-Verbindung
         attention_output, attention_weights = self.self_attention(
             hidden_states,
             hidden_states,
             hidden_states,
-            need_weights=True,
+            need_weights=True, # Gibt Attention-Gewichte für Analyse zurück
             average_attn_weights=False,
         )
         hidden_states = self.norm_1(hidden_states + self.dropout(attention_output))
@@ -374,30 +409,31 @@ class PatchTSTEncoderBlock(nn.Module):
 
 
 # Python Klasse für das PatchTST Modell (Basis ist PyTorch Lightning Framework)
+# PatchTST teilt die Eingangssequenz in überlappende Patches auf und verarbeitet diese in den Transformerblöcken
 class PatchTSTModel(pl.LightningModule):
     def __init__(
         self,
         input_dim: int,
         horizon: int,
-        num_series: int,
+        num_series: int,  # Gesamtanzahl der Zeitreihen (für Embedding-Größe)
         learning_rate: float,
-        d_model: int,
-        attention_head_size: int,
-        hidden_continuous_size: int,
+        d_model: int,     # Hidden Size
+        attention_head_size: int, # Anzahl der Attention-Heads
+        hidden_continuous_size: int, # FFN-Zwischengröße
         dropout: float,
         patch_len: int,
         patch_stride: int,
         num_transformer_layers: int,
         series_emb_dim: int,
-        mase_denoms: dict,
-        series_mapping,
-        feature_names: list[str],
-        quantiles: list[float] | None = None,
+        mase_denoms: dict,  # Vorberechnete MAE der Naivprognose je Zeitreihe für MASE-Berechnung
+        series_mapping,     # Zuordnung numerischer Index → originale Zeitreihen-ID
+        feature_names: list[str], # Namen der Input-Features (nur für Logging und Analyse)
+        quantiles: list[float] | None = None, # Zu prognostizierende Quantile, hier keine da Punktforecasrt
     ):
         super().__init__()
 
         # Festlegen der verschieden Parameter des Modells
-        self.save_hyperparameters(ignore=["mase_denoms", "series_mapping", "feature_names"])
+        self.save_hyperparameters(ignore=["mase_denoms", "series_mapping", "feature_names"]) # save_hyperparameters speichert alle Parameter für Checkpoint-Wiederherstellung
         self.input_dim = int(input_dim)
         self.horizon = int(horizon)
         self.num_series = int(num_series)
@@ -417,6 +453,7 @@ class PatchTSTModel(pl.LightningModule):
         self.series_mapping = series_mapping
         self.feature_names = list(feature_names)
 
+        # Zeitreihen-Embedding - lernt eine spezifische Repräsentation für jede Zeitreihe
         self.series_embedding = nn.Embedding(self.num_series + 1, self.series_emb_dim)
         self.input_norm = nn.LayerNorm(self.input_dim)
         self.patch_projection = nn.Linear(self.patch_len * (self.input_dim + self.series_emb_dim), self.d_model)
@@ -432,7 +469,9 @@ class PatchTSTModel(pl.LightningModule):
                 for _ in range(self.num_transformer_layers)
             ]
         )
+        # LayerNorm nach dem letzten Encoder-Block
         self.encoder_norm = nn.LayerNorm(self.d_model)
+        # Output-Head: transformiert den gepoolten Hidden State in Quantilprognosen
         self.output_head = nn.Sequential(
             nn.Linear(self.d_model, self.d_model),
             nn.GELU(),
@@ -440,51 +479,59 @@ class PatchTSTModel(pl.LightningModule):
             nn.Linear(self.d_model, self.horizon * self.num_quantiles),
         )
 
+        # Zwischenspeicher für Validierungs-Batches . Diese werden am Epochenende zusammengefasst
         self._val_pred_batches = []
         self._val_true_batches = []
         self._val_series_batches = []
-        self._last_attention_weights = None
+
+        self._last_attention_weights = None 
 
     # Erstellen der Patches - Besonderheit des PatchTST Modells.
     def make_patches(self, encoder_cont: torch.Tensor, series_ids: torch.Tensor) -> torch.Tensor:
+        # Encoder und Embidding Features verarbeiten
         encoder_cont = self.input_norm(encoder_cont)
         series_emb = self.series_embedding(series_ids).unsqueeze(1).expand(-1, encoder_cont.size(1), -1)
+        # Econder und Embedding Features aneinanderhängen
         encoder_inputs = torch.cat([encoder_cont, series_emb], dim=-1)
 
         if encoder_inputs.size(1) < self.patch_len:
             pad_len = self.patch_len - encoder_inputs.size(1)
             encoder_inputs = F.pad(encoder_inputs, (0, 0, pad_len, 0))
-
+        
+        # unfold() erstellt überlappende Fenster (Patches) entlang der Zeitdimension
         patches = encoder_inputs.unfold(dimension=1, size=self.patch_len, step=self.patch_stride)
         patches = patches.contiguous().permute(0, 1, 3, 2).reshape(encoder_inputs.size(0), -1, self.patch_len * encoder_inputs.size(2))
         return patches
 
     # Funktion des Forwardpasses (Erstellung der Prognose)
     def forward(self, x: dict) -> dict:
+        # Encoder-Features aus dem Batch-Dictionary extrahieren
         encoder_cont = x["encoder_cont"].float()
 
+        # Zeitreihen-IDs aus den Gruppen extrahieren
         group_values = x["groups"]
+        # Falls die gelieferte Form zweidimensional ist (Batch und Gruppe), dann nehme nu die erste Spalte mit Gruppeninfo 
         if group_values.ndim == 2:
             group_values = group_values[:, 0]
         series_ids = group_values.long()
 
+        # Patches aus der Eingangssequenz erzeugen. Das ist der Kern-Mechanismus des PatchTST
         patches = self.make_patches(encoder_cont, series_ids)
         hidden_states = self.patch_projection(patches)
 
-        if hidden_states.size(1) > self.positional_embedding.size(1):
-            raise ValueError(
-                f"Zu viele Patches ({hidden_states.size(1)}). Erhöhe die maximale Positional-Embedding-Länge."
-            )
-
+        # Embedding dem Hidden State hinzufügen
         hidden_states = hidden_states + self.positional_embedding[:, : hidden_states.size(1), :]
 
+        # Sequentiell durch alle gestapelten Encoder-Blöcke laufen und hidden_states sammeln
         attention_weights = None
         for encoder_block in self.encoder_blocks:
             hidden_states, attention_weights = encoder_block(hidden_states)
 
+        # Finale Normalisierung nach allen Encoder-Blöcken
         hidden_states = self.encoder_norm(hidden_states)
         pooled_hidden = hidden_states.mean(dim=1)
-
+  
+        # Vorhersage im letzten Attention Kopf erzeugen
         prediction = self.output_head(pooled_hidden)
         prediction = prediction.view(-1, self.horizon, self.num_quantiles)
 
@@ -496,6 +543,7 @@ class PatchTSTModel(pl.LightningModule):
             "attention": attention_weights,
         }
 
+    # Funktion zum Start der Epoche - leert alle Validerungslisten für Vorhersage, IST und Serien für die Epoche
     def on_validation_epoch_start(self):
         self._val_pred_batches = []
         self._val_true_batches = []
@@ -510,12 +558,15 @@ class PatchTSTModel(pl.LightningModule):
             y_true_log = y.float()
 
         network_out = self(x)
+        # Quantile Loss als Trainingsziel Log-Space, da y_log als Ziel
         loss = quantile_loss(network_out["prediction"], y_true_log, self.quantiles)
 
+        # Logging des Trainingsverlustes pro Epoche für CSV und pro Schritt für Fortschrittsanzeige
         self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
         self.log("train_loss_step", loss, on_step=True, on_epoch=False, prog_bar=False, logger=True)
         return loss
 
+    # Valsierungsfunktion
     def validation_step(self, batch, batch_idx):
         x, y = batch
         if isinstance(y, (tuple, list)):
@@ -524,37 +575,49 @@ class PatchTSTModel(pl.LightningModule):
             y_true_log = y.float()
 
         network_out = self(x)
+        # Vorhersage ermitteln
         prediction = network_out["prediction"]
+
+        # Validierungsloss im Log-Space wie bei training_step)
         val_loss = quantile_loss(prediction, y_true_log, self.quantiles)
         self.log("val_loss", val_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
+        # Sanity Check: kurzer Durchlauf vor dem ersten echten Training. Ist ein Feature von Pytorch und dient nur dazu die gesamte Datenpipline zu testen bevor richtig traniert wird.
         if self.trainer is not None and self.trainer.sanity_checking:
             return val_loss
 
+        # Punktprognose aus Quantil-Ausgaben extrahieren
         pred_log = extract_point_forecast(prediction.detach().float().cpu().numpy())
         true_log = y_true_log.detach().float().cpu().numpy()
 
+        # Wieder in den Originalraum transformieren
         pred_y = np.expm1(pred_log).clip(min=0.0)
         true_y = np.expm1(true_log).clip(min=0.0)
 
+
         series_ids = extract_series_ids_from_raw_x(x, self.series_mapping)
 
+        # Batch-Ergebnisse in den  Epochenlisten speichern
         self._val_pred_batches.append(pred_y)
         self._val_true_batches.append(true_y)
         self._val_series_batches.append(series_ids)
         return val_loss
 
+    # Funktion für das Ende der Epoche - alle Batch-Ergebnisse aggregieren und finale Metriken berechnen
     def on_validation_epoch_end(self):
+        # Beim Sanity Check oder leeren Epochenlisten keine Metrikberechnung durchführen
         if self.trainer is not None and self.trainer.sanity_checking:
             return
 
         if not self._val_pred_batches:
             return
 
+        # Alle Batches zu einem großen Array zusammenführen
         pred_y = np.concatenate(self._val_pred_batches, axis=0)
         true_y = np.concatenate(self._val_true_batches, axis=0)
         series_ids = np.concatenate(self._val_series_batches, axis=0)
 
+        # Berechnung aller Evaluationsmetriken 
         metrics = eval_mase_mse_wape_weekly_from_arrays(
             pred_y=pred_y,
             true_y=true_y,
@@ -562,6 +625,7 @@ class PatchTSTModel(pl.LightningModule):
             mase_denoms=self.mase_denoms,
         )
 
+        # Logging aller Metriken - val_mase als Steuerungsmetrik für Early Stopping und LR-Scheduler
         self.log("val_mase", float(metrics["mase"]), on_epoch=True, prog_bar=True, logger=True)
         self.log("val_mase_w1", float(metrics["mase_w1"]), on_epoch=True, prog_bar=False, logger=True)
         self.log("val_mase_w2", float(metrics["mase_w2"]), on_epoch=True, prog_bar=False, logger=True)
@@ -576,12 +640,16 @@ class PatchTSTModel(pl.LightningModule):
 
         self.log("val_mse", float(metrics["mse"]), on_epoch=True, prog_bar=False, logger=True)
 
-        print("val_mase logged:", self.trainer.callback_metrics.get("val_mase"))
+        # Zwischenausgabe wären des Tranings
+        # Wurde vorallem am Anfang fürs Testen genutzt
+        print("val_mase:", self.trainer.callback_metrics.get("val_mase"))
         print("lr:", self.trainer.optimizers[0].param_groups[0]["lr"])
 
     def configure_optimizers(self):
+        # Adam-Optimizer: adaptiver Gradientenabstieg. Grundsätzlich gut für Transformer-Modelle geeignet
         optimizer = torch.optim.Adam(self.parameters(), lr=self.learning_rate)
 
+        # ReduceLROnPlateau: reduziert die Lernrate wenn keine Verbesserung von val_mase erkannt wird
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode="min",
@@ -592,6 +660,7 @@ class PatchTSTModel(pl.LightningModule):
             min_lr=LR_MIN,
         )
 
+        # Konfiguration des LR-Schedulers. Überwacht val_mase einmal pro Epoche
         return {
             "optimizer": optimizer,
             "lr_scheduler": {
@@ -602,33 +671,32 @@ class PatchTSTModel(pl.LightningModule):
             },
         }
 
-
-
+# Erstellt die TimeSeriesDataSet-Objekte für Training und Validierung
 def build_timeseries_datasets(df: pd.DataFrame):
     df = df.copy()
+    # Zur Sicherheit allle Datentypen nochmals auf String festlegen
     df["series_id"] = df["series_id"].astype(str)
     df["item_id"] = df["item_id"].astype(str)
     df["store_id"] = df["store_id"].astype(str)
     df["state_id"] = df["state_id"].astype(str)
     df["time_idx"] = df["time_idx"].astype(int)
 
+    # Nimm die angebene Anzahl an Serien aus dem Subset. In diesem Falle identisch, beides 1000 Serien
     if MAX_SERIES is not None:
-        allowed_series = sorted(df["series_id"].unique())[:MAX_SERIES]
-        df = df[df["series_id"].isin(allowed_series)].copy()
+        allowed_series = sorted(df["series_id"].unique())[:MAX_SERIES] # die ersten 1000 Serien
+        df = df[df["series_id"].isin(allowed_series)].copy()  # Kopieren in DF 
 
+    # Featurespalten erstellen
     known_reals, unknown_reals = build_feature_columns()
 
-    missing_known = [col for col in known_reals if col not in df.columns]
-    missing_unknown = [col for col in unknown_reals if col not in df.columns]
-    if missing_known or missing_unknown:
-        raise KeyError(f"Fehlende Feature-Spalten. known={missing_known}, unknown={missing_unknown}")
-
+    # Split-Grenzen(leter Tag eines Splits) bestimmen
     train_cutoff = int(df.loc[df["split"] == "train", "time_idx"].max())
     val_cutoff = int(df.loc[df["split"] == "val", "time_idx"].max())
-    #test_cutoff = int(df.loc[df["split"] == "test", "time_idx"].max())
+    #test_cutoff = int(df.loc[df["split"] == "test", "time_idx"].max())  # Wurde für Test ürsprunglich mitentwickelt, ist aber für das Traning nicht nötig
 
+    # Trainingsdatensatz
     training = TimeSeriesDataSet(
-        df[df.time_idx <= train_cutoff],
+        df[df.time_idx <= train_cutoff], # bis zum letzten Traningstag
         time_idx="time_idx",
         target="y_log",
         group_ids=["series_id"],
@@ -646,19 +714,20 @@ def build_timeseries_datasets(df: pd.DataFrame):
         allow_missing_timesteps=False,
     )
 
+    # Validerungsdatensatz - identisch wie Traning nur für Valdierungsdaten
     validation = TimeSeriesDataSet.from_dataset(
         training,
         df[df.time_idx <= val_cutoff],
         predict=True,
         stop_randomization=True,
-        min_prediction_idx=train_cutoff + 1,
+        min_prediction_idx=train_cutoff + 1,  # Prognosen starten am ersten val Tag
     )
-
 
     return training, validation
 
 
 # Funktion mit der der Optunasuchlauf gesteuert wird. Enthält den gesamten Optuna Suchraum, auch vorgestellt in der Arbeit.
+# Hier wird der Suchraum gepflegt
 def suggest_hyperparameters(optuna_trial: optuna.Trial) -> dict:
     return {
         "learning_rate": optuna_trial.suggest_float("learning_rate", 1e-4, 5e-3, log=True),
@@ -668,8 +737,8 @@ def suggest_hyperparameters(optuna_trial: optuna.Trial) -> dict:
         "num_transformer_layers": optuna_trial.suggest_categorical("num_transformer_layers", [2, 3]), # wie viele Transformer-Blöcke gestapelt werden. 
     }
 
-# Funktion um die Metrikausgabe zu sortieren
-def reorder_metrics_columns(metrics_dataframe: pd.DataFrame) -> pd.DataFrame:
+# Funktion um die Metrikausgabe für die CSV zu sortieren
+def reorder_metrics_columns(metrics_dataframe: pd.DataFrame):
     column_order = [
         "epoch",
         "train_loss",
@@ -690,10 +759,10 @@ def reorder_metrics_columns(metrics_dataframe: pd.DataFrame) -> pd.DataFrame:
     ]
     existing_columns = [col for col in column_order if col in metrics_dataframe.columns]
     remaining_columns = [col for col in metrics_dataframe.columns if col not in existing_columns]
+    # Alle Spalten ausgeben
     return metrics_dataframe[existing_columns + remaining_columns]
 
-
-
+# Sammelt Prognosen und wahre Werte über alle Batches eines DataLoaders für die finale Evaluation
 def collect_predictions(model: PatchTSTModel, dataloader, series_mapping, device):
     model = model.to(device)
     model.eval()
@@ -702,6 +771,7 @@ def collect_predictions(model: PatchTSTModel, dataloader, series_mapping, device
     true_logs = []
     series_ids_all = []
 
+    # torch.no_grad() deaktiviert die Gradientenberechnung. Geschwindigkeitsvorteil
     with torch.no_grad():
         for batch in dataloader:
             x, y = batch
@@ -711,14 +781,18 @@ def collect_predictions(model: PatchTSTModel, dataloader, series_mapping, device
             else:
                 y_true_log = y.to(device).float()
 
+
+            # Erstellung der Prgnosen model() ruft forward_pass auf
             network_out = model(x)
             prediction = network_out["prediction"].detach().float().cpu().numpy()
             true_log = y_true_log.detach().float().cpu().numpy()
 
+            # ersteelle Punktforecast
             prediction_logs.append(extract_point_forecast(prediction))
             true_logs.append(true_log)
             series_ids_all.append(extract_series_ids_from_raw_x(x, series_mapping))
-
+    
+    # Alle Batches zu Arrays zusammenführen und zurückgeben
     return {
         "prediction_log": np.concatenate(prediction_logs, axis=0),
         "true_log": np.concatenate(true_logs, axis=0),
@@ -745,6 +819,7 @@ def train_one_seed(
     patch_stride = PATCH_STRIDE
     num_transformer_layers = NUM_TRANSFORMER_LAYERS
 
+    # Optuna-Hyperparameter überschreiben die globalen Standardwerte falls Optuna läuft
     if hpo_params is not None:
         learning_rate = float(hpo_params.get("learning_rate", learning_rate))
         d_model = int(hpo_params.get("d_model", d_model))
@@ -753,8 +828,10 @@ def train_one_seed(
         dropout_rate = float(hpo_params.get("dropout", dropout_rate))
         num_transformer_layers = int(hpo_params.get("num_transformer_layers", num_transformer_layers))
 
+    # Seed setzen für Reproduzierbarkeit
     set_seed(seed_value)
 
+    # Konfig aller Modellinfos dient der Dokumentation
     seed_config = {
         "model": "PatchTST",
         "encoder_len": ENCODER_LEN,
@@ -789,9 +866,12 @@ def train_one_seed(
     # Erstellen von Trainings- und Validierungs-Dataset
     training_ds, val_ds = build_timeseries_datasets(df)
     series_mapping = get_series_id_mapping(training_ds)
+    # Anzahl der Zeitreihen bestimmen
     num_series = len(series_mapping) if series_mapping is not None else int(df["series_id"].nunique())
     feature_names = list(training_ds.reals)
 
+    # DataLoader konfigurieren: num_workers für paralleles Datenladen - Num Workers wurde viel getestet
+    # In der Cloud hat sich num_workers 6 als beste Konfiguration herausgestellt. Ist bei allem Modellen identisch
     train_loader = training_ds.to_dataloader(
         train=True,
         batch_size=batch_size,
@@ -807,6 +887,7 @@ def train_one_seed(
         pin_memory=(TORCH_DEVICE == "cuda"),
     )
 
+    # Input-Dimension dynamisch aus dem ersten Batch bestimmen
     sample_batch = next(iter(train_loader))
     sample_x, _ = sample_batch
     input_dim = int(sample_x["encoder_cont"].shape[-1])
@@ -837,12 +918,12 @@ def train_one_seed(
     ckpt = ModelCheckpoint(
         dirpath=str(run_dir),
         filename="best",
-        monitor="val_mase",
-        save_top_k=1,
+        monitor="val_mase", # Speichert den Checkpoint mit dem niedrigsten val_mase
+        save_top_k=1,       # Behält nur den besten Checkpoint
         mode="min",
     )
 
-    # IMportierte Lighting Funktion zur Überwachung und Steuerung der Verbesserung während des Tranings aufrufen. 
+    # Iportierte Lighting Funktion zur Überwachung und Steuerung der Verbesserung während des Tranings aufrufen. 
     early = EarlyStopping(
         monitor="val_mase",
         patience=PATIENCE,
@@ -850,26 +931,30 @@ def train_one_seed(
         min_delta=MIN_DELTA,
     )
 
+    # Überwacht und loggt die aktuelle Lernrate nach jeder Epoche
     lr_monitor = LearningRateMonitor(logging_interval="epoch")
 
+    # Trainer konfigurieren, alle Trainingskomponenten zusammenfassen
     trainer = pl.Trainer(
         max_epochs=MAX_EPOCHS,
         accelerator=DEVICE,
         devices=1,
         precision="bf16-mixed" if TORCH_DEVICE == "cuda" else "32-true",
-        gradient_clip_val=0.1,
+        gradient_clip_val=0.1, # # Gradient Clipping verhindert explodierende Gradienten. Wurde bewusst festgesetzt und nicht per Optuna bestimmt um den Suchraum klein zu halten
         logger=csv_logger,
         callbacks=[ckpt, early, lr_monitor],
         log_every_n_steps=70,
-        enable_progress_bar=True,
+        enable_progress_bar=True, # Gib eine Fortschrittsanzeige aus beim Traning
         enable_model_summary=False,
         profiler=None,
     )
 
+    #  Trainingszeit messen für die Kosten und Zeitberechnung in der Arbeit
     total_start = time.perf_counter()
     trainer.fit(model, train_dataloaders=train_loader, val_dataloaders=val_loader)
     total_time = time.perf_counter() - total_start
 
+    # Bestes Modell aus dem Checkpoint laden um die finale Prognose zum Schluss des Tranings auf dem Valsplit zu machen
     best_path = ckpt.best_model_path
     if best_path:
         model = PatchTSTModel.load_from_checkpoint(
@@ -892,6 +977,7 @@ def train_one_seed(
         )
 
     # Ermittelte Metriken speichern
+    # Liest die Lightning CSV-Logs und rekonstruiert eine pro-Epoche Tabelle
     metrics_csv = Path(csv_logger.log_dir) / "metrics.csv"
     epoch_rows = []
     if metrics_csv.exists():
@@ -900,6 +986,7 @@ def train_one_seed(
         for ep in epochs:
             subset = log_df[log_df["epoch"] == ep]
 
+            # Standardzeile mit NaN-Werten initialisieren. Werden nachher mit korrekten Werten befüllt
             row = {
                 "epoch": ep + 1,
                 "train_loss": np.nan,
@@ -919,6 +1006,7 @@ def train_one_seed(
                 "epoch_time_sec": np.nan,
             }
 
+            # verschiedene Spaltennamen je nach Lightning-Version testen, jenachdem wie es von Lightning bennant wurde
             for train_key in ["train_loss_epoch", "train_loss", "train_loss_step"]:
                 if train_key in subset.columns:
                     tmp = subset[train_key].dropna()
@@ -926,6 +1014,7 @@ def train_one_seed(
                         row["train_loss"] = float(tmp.iloc[-1])
                         break
 
+            # Validierungsmetriken direkt aus den CSV-Spalten lesen
             for col in [
                 "val_loss",
                 "val_mase",
@@ -945,6 +1034,7 @@ def train_one_seed(
                     if len(tmp) > 0:
                         row[col] = float(tmp.iloc[-1])
 
+            # LR - verschiedene Spaltennamen je nach Optimizer-Konfiguration ausprobieren
             for lr_key in ["lr-Adam", "lr"]:
                 if lr_key in subset.columns:
                     tmp = subset[lr_key].dropna()
@@ -953,41 +1043,49 @@ def train_one_seed(
                         break
 
             epoch_rows.append(row)
-
+    
+    # Finale Prognosen und Metriken auf dem Validierungsset berechnen
     prediction_output = collect_predictions(model, val_loader, series_mapping, model.device)
 
-    if not epoch_rows:
-        epoch_rows = [{
-            "epoch": 1,
-            "train_loss": np.nan,
-            "val_loss": np.nan,
-            "val_mase": np.nan,
-            "val_mase_w1": np.nan,
-            "val_mase_w2": np.nan,
-            "val_mase_w3": np.nan,
-            "val_mase_w4": np.nan,
-            "val_wape": np.nan,
-            "val_wape_w1": np.nan,
-            "val_wape_w2": np.nan,
-            "val_wape_w3": np.nan,
-            "val_wape_w4": np.nan,
-            "val_mse": np.nan,
-            "lr": float(learning_rate),
-            "epoch_time_sec": float(total_time),
-        }]
+    # Nur zu Sicherheit. Nicht nötig
+    # if not epoch_rows:
+    #     epoch_rows = [{
+    #         "epoch": 1,
+    #         "train_loss": np.nan,
+    #         "val_loss": np.nan,
+    #         "val_mase": np.nan,
+    #         "val_mase_w1": np.nan,
+    #         "val_mase_w2": np.nan,
+    #         "val_mase_w3": np.nan,
+    #         "val_mase_w4": np.nan,
+    #         "val_wape": np.nan,
+    #         "val_wape_w1": np.nan,
+    #         "val_wape_w2": np.nan,
+    #         "val_wape_w3": np.nan,
+    #         "val_wape_w4": np.nan,
+    #         "val_mse": np.nan,
+    #         "lr": float(learning_rate),
+    #         "epoch_time_sec": float(total_time),
+    #     }]
 
+    # Durchschnittliche Zeit pro Epoche berechnen
     epoch_rows[-1]["epoch_time_sec"] = float(total_time / max(len(epoch_rows), 1))
 
+    # Metriken als CSV mit korrekter Spaltenreihenfolge speichern
     metrics_dataframe = reorder_metrics_columns(pd.DataFrame(epoch_rows))
     metrics_dataframe.to_csv(run_dir / "metrics.csv", index=False)
 
+    # Trainingsplots erstellen und speichern - aus run_logger
     save_plots(run_dir, epoch_rows)
 
+    # Rücktransformation aus Log-Space in Originalraum
     pred_y = np.expm1(prediction_output["prediction_log"]).clip(min=0.0)
     true_y = np.expm1(prediction_output["true_log"]).clip(min=0.0)
+    # Metrikberechnung auf den finalen Prognosen des besten Modell-Checkpoints
     val_metrics = eval_mase_mse_wape_weekly_from_arrays(pred_y, true_y, prediction_output["series_ids"], mase_denoms)
-    external_val_loss = eval_loss_logspace_from_arrays(prediction_output["prediction_log"], prediction_output["true_log"])
+    external_val_loss = calc_mse_loss_logspace(prediction_output["prediction_log"], prediction_output["true_log"])
 
+    # Finale Metriken in die letzte Epochenzeile schreiben
     if epoch_rows:
         epoch_rows[-1]["val_loss"] = float(external_val_loss)
         epoch_rows[-1]["val_mase"] = float(val_metrics["mase"])
@@ -1002,15 +1100,18 @@ def train_one_seed(
         epoch_rows[-1]["val_wape_w4"] = float(val_metrics["wape_w4"])
         epoch_rows[-1]["val_mse"] = float(val_metrics["mse"])
 
+    # MetrikCSV nochmals überschreiben wenn die finalen Werte da sind
     metrics_dataframe = reorder_metrics_columns(pd.DataFrame(epoch_rows))
     metrics_dataframe.to_csv(run_dir / "metrics.csv", index=False)
 
+    # Beste Epoche anhand des niedrigsten val_mase bestimmen - Für summary
     if "val_mase" in metrics_dataframe.columns and metrics_dataframe["val_mase"].notna().any():
         best_epoch_idx = metrics_dataframe["val_mase"].astype(float).idxmin()
         best_epoch_row = metrics_dataframe.loc[best_epoch_idx].to_dict()
     else:
         best_epoch_row = metrics_dataframe.iloc[-1].to_dict()
 
+    # Ausgabe der Summary des Tranings als JSON File
     summary = {
         "seed": int(seed_value),
         "best_model_path": best_path,
@@ -1035,28 +1136,33 @@ def train_one_seed(
     save_json(run_dir / "summary.json", summary)
     save_excel(run_dir, seed_config, epoch_rows, summary)
 
-    print("Saved:", run_dir / "metrics.xlsx")
-    print("Best checkpoint:", best_path)
+    print("Gespeichert unter:", run_dir / "metrics.xlsx")
+    print("Bester Checkpoint unter:", best_path)
     return summary
 
 
-
+# Hilfsfunktion erzeugt eine Liste von Seeds für einen Optuna-Trial
 def build_trial_seed_list(trial_base_seed: int, trial_seed_count: int) -> list[int]:
     if trial_seed_count <= 1:
         return [trial_base_seed]
     return [trial_base_seed + i for i in range(trial_seed_count)]
 
 
-
+# objective_factory() ist eine Funktion die eine andere Funktion zurückgibt. Das ist nötig,
+# weil Optuna intern nur def objective(trial) akzeptiert, die objective-Funktion aber
+# zusätzlich df und mase_denoms benötigt — diese werden hier einmalig mitgegeben.
 def objective_factory(df: pd.DataFrame, mase_denoms: dict, optuna_base_dir: Path):
     def objective(optuna_trial: optuna.Trial) -> float:
+        # Hyperparameter für diesen Trial sampeln
         suggested_hyperparameters = suggest_hyperparameters(optuna_trial)
+        # Separates Verzeichnis für jeden Trial anlegen
         trial_run_dir = optuna_base_dir / f"optuna_trial_{optuna_trial.number:04d}"
         trial_run_dir.mkdir(parents=True, exist_ok=True)
 
         trial_seed_list = build_trial_seed_list(BASE_SEED, OPTUNA_SEEDS_PER_TRIAL)
         validation_mase_values = []
 
+        # Jeden Seed des Trials trainieren und val_mase sammeln
         for seed_value in trial_seed_list:
             seed_run_dir = trial_run_dir / f"seed_{seed_value}"
             seed_run_dir.mkdir(parents=True, exist_ok=True)
@@ -1069,7 +1175,9 @@ def objective_factory(df: pd.DataFrame, mase_denoms: dict, optuna_base_dir: Path
             )
             validation_mase_values.append(float(seed_summary["best_val_mase"]))
 
+        # Mittleren MASE über alle Seeds als Trial-Ergebnis zurückgeben
         mean_validation_mase = float(np.mean(validation_mase_values)) if validation_mase_values else float("inf")
+        # Trial-Metadaten für spätere Analyse speichern
         optuna_trial.set_user_attr("trial_seeds", trial_seed_list)
         optuna_trial.set_user_attr("val_mases", validation_mase_values)
         return mean_validation_mase
@@ -1079,21 +1187,14 @@ def objective_factory(df: pd.DataFrame, mase_denoms: dict, optuna_base_dir: Path
 
 # Hauptfuntion des Skripts das alle Funktionen aufruft und den kompletten Traningsdurchlauf startet
 def main():
+    # Daten laden und Zeitreihen-Features hinzufügen
     df = load_preprocessed()
     df = add_time_series_features(df)
 
     known_reals, unknown_reals = build_feature_columns()
 
     # Alle kontinuierlichen Features (Encoder + Decoder)
-    # Diese Liste wird für die Feature Importance genutzt
     all_features = known_reals + unknown_reals
-
-    required_cols = ["series_id", "item_id", "store_id", "state_id", "time_idx", "split", "y_log"] + known_reals + unknown_reals
-   
-    # missing Cols nur für die Ausgabe falls im Datensatz Informationen fehlen
-    missing_cols = [col for col in dict.fromkeys(required_cols) if col not in df.columns]
-    if missing_cols:
-        raise KeyError(f"Fehlende Spalten im DataFrame: {missing_cols}")
 
     # Training Dataset aus dem gesamten Dataset erstellen (finales Subset), bei dem der Split mit train markiert ist
     train_df = df[df["split"] == "train"].copy()
@@ -1101,6 +1202,7 @@ def main():
     # MASE Nenner errechnen
     mase_denoms = compute_mase_denominators(train_df, seasonality=7)
 
+    # Dient der Dokumentation
     config = {
         "model": "PatchTST",
         "encoder_len": ENCODER_LEN,
@@ -1131,6 +1233,7 @@ def main():
         "optuna_trials": OPTUNA_TRIALS,
     }
 
+    # Verzeichnis für den Run erstellen
     ts = time.strftime("%Y%m%d-%H%M%S")
     parent_run_dir = RUNS_DIR / f"{ts}_PatchTST_seed={BASE_SEED}__num_seeds={NUM_SEEDS}"
     parent_run_dir.mkdir(parents=True, exist_ok=True)
@@ -1143,31 +1246,37 @@ def main():
         optuna_run_dir.mkdir(parents=True, exist_ok=True)
 
         objective_function = objective_factory(df=df, mase_denoms=mase_denoms, optuna_base_dir=optuna_run_dir)
+        # neue Study erstellen
         optuna_study = optuna.create_study(direction=OPTUNA_DIRECTION)
+        # Optimiertung starten
         optuna_study.optimize(objective_function, n_trials=OPTUNA_TRIALS, timeout=OPTUNA_TIMEOUT_SEC)
 
+        # Plots erstellen
         plot_optimization_history(optuna_study).write_html(optuna_run_dir / "optuna_optimization_history.html")
         plot_param_importances(optuna_study).write_html(optuna_run_dir / "optuna_param_importances.html")
         plot_parallel_coordinate(optuna_study).write_html(optuna_run_dir / "optuna_parallel_coordinate.html")
         plot_slice(optuna_study).write_html(optuna_run_dir / "optuna_slice.html")
 
+        # Beste Kofiguration als JSON Speichern
         best_hyperparameters = optuna_study.best_params
-        save_json(
-            optuna_run_dir / "optuna_summary.json",
+        save_json(optuna_run_dir / "optuna_summary.json",
             {
                 "best_value": float(optuna_study.best_value),
                 "best_params": best_hyperparameters,
                 "n_trials": int(len(optuna_study.trials)),
             },
         )
+    # Wenn kein Optuna genutzt wird bleibt es leer
     else:
         best_hyperparameters = None
 
+    # Variabeln für die besten Ergebnisse pro Seed erstellen
     all_seed_summaries = []
     best_overall_val_mase = float("inf")
     best_overall_seed = None
     best_overall_model_path = None
 
+    # Jeden Seed nacheinander trainieren
     for seed_offset in range(NUM_SEEDS):
         current_seed = int(BASE_SEED) + int(seed_offset)
         run_dir = parent_run_dir / f"seed_{current_seed}"
@@ -1188,6 +1297,7 @@ def main():
             best_overall_seed = int(current_seed)
             best_overall_model_path = seed_summary["best_model_path"]
 
+    # Übergrreifende Summary über alle Seeds erstellen
     overall_summary = {
         "best_overall_seed": best_overall_seed,
         "best_overall_val_mase": float(best_overall_val_mase),
@@ -1197,7 +1307,7 @@ def main():
     }
     save_json(parent_run_dir / "overall_summary.json", overall_summary)
 
-    print("Saved:", parent_run_dir / "overall_summary.json")
+    print("Gespeichert unter:", parent_run_dir / "overall_summary.json")
 
 # Aufrufen der Hauptfunktion main() zum starten des Skriptes
 if __name__ == "__main__":
